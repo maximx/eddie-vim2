@@ -14,7 +14,7 @@ function! PresentationModeOn()
 endfunction
 
 function! PresentationModeOff()
-  colorscheme solarized_dark
+  colorscheme ir_black
 
   if has("gui_macvim")
     set guifont=Monaco:h17           " for Mac
