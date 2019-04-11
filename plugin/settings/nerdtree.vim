@@ -9,11 +9,10 @@ let g:nerdtree_tabs_open_on_gui_startup=0
 let NERDTreeMinimalUI=1
 let NERDTreeDirArrows=1
 let g:NERDTreeWinSize=30
-let NERDTreeIgnore=['\.pyc$']
+let NERDTreeIgnore=['\.pyc$', '\.meta$']
 
 " open directory of current opened file
 map <leader>r :NERDTreeFind<cr>
 
 " close window if the only window left is NERDTree
 autocmd bufenter * if (winnr("$") == 1 && exists("b:NERDTreeType") && b:NERDTreeType == "primary") | q | endif
-
