@@ -1,6 +1,7 @@
 let g:ctrlp_custom_ignore = {
   \ 'dir':  '\v[\/]\.(git|hg|svn)$',
   \ 'binary file': '\v\.(exe|so|dll)$',
+  \ 'file': '\v\.(meta)$',
   \ }
 let g:ctrlp_working_path_mode=0
 let g:ctrlp_match_window_bottom=1
