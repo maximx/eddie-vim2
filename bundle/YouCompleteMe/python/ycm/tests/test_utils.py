@@ -1,4 +1,4 @@
-# Copyright (C) 2011-2018 YouCompleteMe contributors
+# Copyright (C) 2011-2019 YouCompleteMe contributors
 #
 # This file is part of YouCompleteMe.
 #
@@ -34,7 +34,12 @@ import os
 import re
 import sys
 
-from ycmd.utils import GetCurrentDirectory, ToBytes, ToUnicode
+try:
+  from unittest import skipIf
+except ImportError:
+  from unittest2 import skipIf
+
+from ycmd.utils import GetCurrentDirectory, OnMac, OnWindows, ToBytes, ToUnicode
 
 
 BUFNR_REGEX = re.compile( '^bufnr\\(\'(?P<buffer_filename>.+)\', ([01])\\)$' )
@@ -84,14 +89,17 @@ VIM_OPTIONS = {
   '&expandtab': 1
 }
 
-# This variable must be patched with a Version object for tests depending on the
-# Vim version. Example:
+Version = namedtuple( 'Version', [ 'major', 'minor', 'patch' ] )
+
+# This variable must be patched with a Version object for tests depending on a
+# recent Vim version. Example:
 #
-#   @patch( 'ycm.tests.test_utils.VIM_VERSION', Version( 7, 4, 1578 ) )
+#   @patch( 'ycm.tests.test_utils.VIM_VERSION', Version( 8, 1, 614 ) )
 #   def ThisTestDependsOnTheVimVersion_test():
 #     ...
 #
-VIM_VERSION = None
+# Default is the oldest supported version.
+VIM_VERSION = Version( 7, 4, 1578 )
 
 REDIR = {
   'status': False,
@@ -99,8 +107,8 @@ REDIR = {
   'output': ''
 }
 
-
-Version = namedtuple( 'Version', [ 'major', 'minor', 'patch' ] )
+WindowsAndMacOnly = skipIf( not OnWindows() or not OnMac(),
+                            'Windows and macOS only' )
 
 
 @contextlib.contextmanager
@@ -293,7 +301,7 @@ def _MockVimEval( value ):
   if value == REDIR[ 'variable' ]:
     return REDIR[ 'output' ]
 
-  raise VimError( 'Unexpected evaluation: {0}'.format( value ) )
+  raise VimError( 'Unexpected evaluation: {}'.format( value ) )
 
 
 def _MockWipeoutBuffer( buffer_number ):
@@ -312,10 +320,12 @@ def _MockSignCommand( command ):
                           'Signs for foo:\n' )
     for sign in VIM_SIGNS:
       if sign.bufnr == bufnr:
-        REDIR[ 'output' ] += (
-          '    line={0}  id={1}  name={2}'.format( sign.line,
-                                                   sign.id,
-                                                   sign.name ) )
+        if VIM_VERSION >= Version( 8, 1, 614 ):
+          # 10 is the default priority.
+          line_output = '    line={}  id={}  name={} priority=10'
+        else:
+          line_output = '    line={}  id={}  name={}'
+        REDIR[ 'output' ] += line_output.format( sign.line, sign.id, sign.name )
     return True
 
   match = SIGN_PLACE_REGEX.search( command )
@@ -442,6 +452,11 @@ class VimBuffer( object ):
     raise ValueError( 'Unexpected mark: {name}'.format( name = name ) )
 
 
+  def __repr__( self ):
+    return "VimBuffer( name = '{}', number = {} )".format( self.name,
+                                                           self.number )
+
+
 class VimBuffers( object ):
   """An object that looks like a vim.buffers object."""
 
@@ -479,6 +494,13 @@ class VimWindow( object ):
     self.buffer = buffer_object
     self.cursor = cursor
     self.options = {}
+
+
+  def __repr__( self ):
+    return "VimWindow( number = {}, buffer = {}, cursor = {} )".format(
+      self.number,
+      self.buffer,
+      self.cursor )
 
 
 class VimWindows( object ):
@@ -532,8 +554,8 @@ class VimMatch( object ):
 
 
   def __repr__( self ):
-    return "VimMatch( group = '{0}', pattern = '{1}' )".format( self.group,
-                                                                self.pattern )
+    return "VimMatch( group = '{}', pattern = '{}' )".format( self.group,
+                                                              self.pattern )
 
 
   def __getitem__( self, key ):
@@ -560,11 +582,11 @@ class VimSign( object ):
 
 
   def __repr__( self ):
-    return ( "VimSign( id = {0}, line = {1}, "
-                      "name = '{2}', bufnr = {3} )".format( self.id,
-                                                            self.line,
-                                                            self.name,
-                                                            self.bufnr ) )
+    return ( "VimSign( id = {}, line = {}, "
+                      "name = '{}', bufnr = {} )".format( self.id,
+                                                          self.line,
+                                                          self.name,
+                                                          self.bufnr ) )
 
 
   def __getitem__( self, key ):
@@ -690,7 +712,7 @@ def ExpectedFailure( reason, *exception_matchers ):
         # Failed for the right reason
         raise nose.SkipTest( reason )
       else:
-        raise AssertionError( 'Test was expected to fail: {0}'.format(
+        raise AssertionError( 'Test was expected to fail: {}'.format(
           reason ) )
     return Wrapper
 
@@ -705,6 +727,8 @@ def ToBytesOnPY2( data ):
   if not PY2:
     return data
 
+  if isinstance( data, int ):
+    return data
   if isinstance( data, list ):
     return [ ToBytesOnPY2( item ) for item in data ]
   if isinstance( data, dict ):

@@ -24,7 +24,12 @@ from __future__ import absolute_import
 from builtins import *  # noqa
 
 from future.utils import iteritems, PY2
-from hamcrest import contains_string, has_entry, has_entries, assert_that
+from hamcrest import ( assert_that,
+                       contains,
+                       contains_string,
+                       has_entries,
+                       has_entry,
+                       has_item )
 from mock import patch
 from webtest import TestApp
 import bottle
@@ -36,6 +41,7 @@ import tempfile
 import time
 import stat
 import shutil
+import json
 
 from ycmd import extra_conf_store, handlers, user_options_store
 from ycmd.completers.completer import Completer
@@ -124,12 +130,6 @@ def CompletionEntryMatcher( insertion_text,
   return has_entries( match )
 
 
-def CompletionLocationMatcher( location_type, value ):
-  return has_entry( 'extra_data',
-                    has_entry( 'location',
-                               has_entry( location_type, value ) ) )
-
-
 def MessageMatcher( msg ):
   return has_entry( 'message', contains_string( msg ) )
 
@@ -164,6 +164,20 @@ def LineColMatcher( line, col ):
     'line_num': line,
     'column_num': col
   } )
+
+
+def CompleterProjectDirectoryMatcher( project_directory ):
+  return has_entry(
+    'completer',
+    has_entry( 'servers', contains(
+      has_entry( 'extras', has_item(
+        has_entries( {
+          'key': 'Project Directory',
+          'value': project_directory,
+        } )
+      ) )
+    ) )
+  )
 
 
 @contextlib.contextmanager
@@ -376,3 +390,36 @@ def WithRetry( test ):
         print( 'Test failed, retrying: {0}'.format( str( test_exception ) ) )
         time.sleep( 0.25 )
   return wrapper
+
+
+@contextlib.contextmanager
+def TemporaryClangProject( tmp_dir, compile_commands ):
+  """Context manager to create a compilation database in a directory and delete
+  it when the test completes. |tmp_dir| is the directory in which to create the
+  database file (typically used in conjunction with |TemporaryTestDir|) and
+  |compile_commands| is a python object representing the compilation database.
+
+  e.g.:
+    with TemporaryTestDir() as tmp_dir:
+      database = [
+        {
+          'directory': os.path.join( tmp_dir, dir ),
+          'command': compiler_invocation,
+          'file': os.path.join( tmp_dir, dir, filename )
+        },
+        ...
+      ]
+      with TemporaryClangProject( tmp_dir, database ):
+        <test here>
+
+  The context manager does not yield anything.
+  """
+  path = os.path.join( tmp_dir, 'compile_commands.json' )
+
+  with open( path, 'w' ) as f:
+    f.write( ToUnicode( json.dumps( compile_commands, indent=2 ) ) )
+
+  try:
+    yield
+  finally:
+    os.remove( path )

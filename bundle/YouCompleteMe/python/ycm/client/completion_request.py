@@ -1,4 +1,4 @@
-# Copyright (C) 2013-2018 YouCompleteMe contributors
+# Copyright (C) 2013-2019 YouCompleteMe contributors
 #
 # This file is part of YouCompleteMe.
 #
@@ -48,7 +48,7 @@ class CompletionRequest( BaseRequest ):
     return bool( self._response_future ) and self._response_future.done()
 
 
-  def RawResponse( self ):
+  def _RawResponse( self ):
     if not self._response_future:
       return NO_COMPLETIONS
 
@@ -71,7 +71,7 @@ class CompletionRequest( BaseRequest ):
 
 
   def Response( self ):
-    response = self.RawResponse()
+    response = self._RawResponse()
     response[ 'completions' ] = _ConvertCompletionDatasToVimDatas(
         response[ 'completions' ] )
     return response
@@ -96,11 +96,11 @@ class CompletionRequest( BaseRequest ):
     # completed item and the list of completions. Sometimes this returns
     # multiple possibilities, which is essentially unresolvable.
     if 'user_data' not in completed_item:
-      completions = self.RawResponse()[ 'completions' ]
+      completions = self._RawResponse()[ 'completions' ]
       return _FilterToMatchingCompletions( completed_item, completions )
 
     if completed_item[ 'user_data' ]:
-      completions = self.RawResponse()[ 'completions' ]
+      completions = self._RawResponse()[ 'completions' ]
       return [ completions[ int( completed_item[ 'user_data' ] ) ] ]
 
     return []
@@ -201,6 +201,8 @@ def _ConvertCompletionDataToVimData( completion_identifier, completion_data ):
     'menu'     : completion_data.get( 'extra_menu_info', '' ),
     'info'     : _GetCompletionInfoField( completion_data ),
     'kind'     : ToUnicode( completion_data.get( 'kind', '' ) )[ :1 ].lower(),
+    # Disable Vim filtering.
+    'equal'    : 1,
     'dup'      : 1,
     'empty'    : 1,
     # We store the completion item index as a string in the completion

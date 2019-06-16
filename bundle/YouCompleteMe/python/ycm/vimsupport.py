@@ -28,8 +28,13 @@ import os
 import json
 import re
 from collections import defaultdict, namedtuple
-from ycmd.utils import ( ByteOffsetToCodepointOffset, GetCurrentDirectory,
-                         JoinLinesAsUnicode, ToBytes, ToUnicode )
+from ycmd.utils import ( ByteOffsetToCodepointOffset,
+                         GetCurrentDirectory,
+                         JoinLinesAsUnicode,
+                         OnMac,
+                         OnWindows,
+                         ToBytes,
+                         ToUnicode )
 
 BUFFER_COMMAND_MAP = { 'same-buffer'      : 'edit',
                        'split'            : 'split',
@@ -54,8 +59,18 @@ SIGN_BUFFER_ID_INITIAL_VALUE = 100000000
 # This holds the next sign's id to assign for each buffer.
 SIGN_ID_FOR_BUFFER = defaultdict( lambda: SIGN_BUFFER_ID_INITIAL_VALUE )
 
+# The ":sign place" command ouputs each sign on one line in the format
+#
+#    line=<line> id=<id> name=<name> priority=<priority>
+#
+# where the words "line", "id", "name", and "priority" are localized. On
+# versions older than Vim 8.1.0614, the "priority" property doesn't exist and
+# the output is
+#
+#    line=<line> id=<id> name=<name>
+#
 SIGN_PLACE_REGEX = re.compile(
-  r"^.*=(?P<line>\d+).*=(?P<id>\d+).*=(?P<name>Ycm\w+)$" )
+  r"^.*=(?P<line>\d+).*=(?P<id>\d+).*=(?P<name>Ycm\w+)" )
 
 NO_COMPLETIONS = {
   'line': -1,
@@ -222,12 +237,12 @@ def CreateSign( line, name, buffer_number ):
 
 
 def UnplaceSign( sign ):
-  vim.command( 'sign unplace {0} buffer={1}'.format( sign.id,
-                                                     sign.buffer_number ) )
+  vim.command( 'sign unplace {} buffer={}'.format( sign.id,
+                                                   sign.buffer_number ) )
 
 
 def PlaceSign( sign ):
-  vim.command( 'sign place {0} name={1} line={2} buffer={3}'.format(
+  vim.command( 'sign place {} name={} line={} buffer={}'.format(
     sign.id, sign.name, sign.line, sign.buffer_number ) )
 
 
@@ -260,14 +275,16 @@ def GetDiagnosticMatchPattern( line_num,
                                line_end_num = None,
                                column_end_num = None ):
   line_num, column_num = LineAndColumnNumbersClamped( line_num, column_num )
+  column_num = max( column_num, 1 )
 
-  if not line_end_num or not column_end_num:
+  if line_end_num is None or column_end_num is None:
     return '\\%{}l\\%{}c'.format( line_num, column_num )
 
   # -1 and then +1 to account for column end not included in the range.
   line_end_num, column_end_num = LineAndColumnNumbersClamped(
       line_end_num, column_end_num - 1 )
-  column_end_num += 1
+  column_end_num = max( column_end_num + 1, 1 )
+
   return '\\%{}l\\%{}c\\_.\\{{-}}\\%{}l\\%{}c'.format( line_num,
                                                        column_num,
                                                        line_end_num,
@@ -277,20 +294,13 @@ def GetDiagnosticMatchPattern( line_num,
 # Clamps the line and column numbers so that they are not past the contents of
 # the buffer. Numbers are 1-based byte offsets.
 def LineAndColumnNumbersClamped( line_num, column_num ):
-  new_line_num = line_num
-  new_column_num = column_num
-
-  max_line = len( vim.current.buffer )
-  if line_num and line_num > max_line:
-    new_line_num = max_line
+  line_num = max( min( line_num, len( vim.current.buffer ) ), 1 )
 
   # Vim buffers are a list of byte objects on Python 2 but Unicode objects on
   # Python 3.
-  max_column = len( ToBytes( vim.current.buffer[ new_line_num - 1 ] ) )
-  if column_num and column_num > max_column:
-    new_column_num = max_column
+  max_column = len( ToBytes( vim.current.buffer[ line_num - 1 ] ) )
 
-  return new_line_num, new_column_num
+  return line_num, min( column_num, max_column )
 
 
 def SetLocationList( diagnostics ):
@@ -331,9 +341,7 @@ def OpenLocationList( focus = False, autoclose = False ):
   SetFittingHeightForCurrentWindow()
 
   if autoclose:
-    # This autocommand is automatically removed when the location list window is
-    # closed.
-    vim.command( 'au WinLeave <buffer> q' )
+    AutoCloseOnCurrentBuffer( 'ycmlocation' )
 
   if VariableExists( '#User#YcmLocationOpened' ):
     vim.command( 'doautocmd User YcmLocationOpened' )
@@ -358,9 +366,7 @@ def OpenQuickFixList( focus = False, autoclose = False ):
   SetFittingHeightForCurrentWindow()
 
   if autoclose:
-    # This autocommand is automatically removed when the quickfix window is
-    # closed.
-    vim.command( 'au WinLeave <buffer> q' )
+    AutoCloseOnCurrentBuffer( 'ycmquickfix' )
 
   if VariableExists( '#User#YcmQuickFixOpened' ):
     vim.command( 'doautocmd User YcmQuickFixOpened' )
@@ -454,10 +460,21 @@ def EscapeFilepathForVimCommand( filepath ):
   return GetVariableValue( to_eval )
 
 
+def ComparePaths( path1, path2 ):
+  # Assume that the file system is case-insensitive on Windows and macOS and
+  # case-sensitive on other platforms. While this is not necessarily true, being
+  # completely correct here is not worth the trouble as this assumption
+  # represents the overwhelming use case and detecting the case sensitivity of a
+  # file system is tricky.
+  if OnWindows() or OnMac():
+    return path1.lower() == path2.lower()
+  return path1 == path2
+
+
 # Both |line| and |column| need to be 1-based
 def TryJumpLocationInTab( tab, filename, line, column ):
   for win in tab.windows:
-    if GetBufferFilepath( win.buffer ) == filename:
+    if ComparePaths( GetBufferFilepath( win.buffer ), filename ):
       vim.current.tabpage = tab
       vim.current.window = win
       vim.current.window.cursor = ( line, column - 1 )
@@ -1228,3 +1245,13 @@ def VimVersionAtLeast( version_string ):
     return actual_major_and_minor > matching_major_and_minor
 
   return GetBoolValue( "has( 'patch{0}' )".format( patch ) )
+
+
+def AutoCloseOnCurrentBuffer( name ):
+  """Create an autocommand group with name |name| on the current buffer that
+  automatically closes it when leaving its window."""
+  vim.command( 'augroup {}'.format( name ) )
+  vim.command( 'autocmd! * <buffer>' )
+  vim.command( 'autocmd WinLeave <buffer> '
+               'if bufnr( "%" ) == expand( "<abuf>" ) | q | endif' )
+  vim.command( 'augroup END' )

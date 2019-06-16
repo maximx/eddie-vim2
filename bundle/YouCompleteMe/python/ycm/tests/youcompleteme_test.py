@@ -22,8 +22,13 @@ from __future__ import absolute_import
 # Not installing aliases from python-future; it's unreliable and slow.
 from builtins import *  # noqa
 
-from ycm.tests.test_utils import ( ExtendedMock, MockVimBuffers, MockVimModule,
-                                   VimBuffer, VimMatch, VimSign )
+from ycm.tests.test_utils import ( ExtendedMock,
+                                   MockVimBuffers,
+                                   MockVimModule,
+                                   Version,
+                                   VimBuffer,
+                                   VimMatch,
+                                   VimSign )
 MockVimModule()
 
 import os
@@ -32,9 +37,14 @@ from hamcrest import ( assert_that, contains, empty, equal_to, has_entries,
                        is_in, is_not, matches_regexp )
 from mock import call, MagicMock, patch
 
+from ycm import vimsupport
 from ycm.paths import _PathToPythonUsedDuringBuild
-from ycm.vimsupport import SetVariableValue, SIGN_BUFFER_ID_INITIAL_VALUE
-from ycm.tests import ( StopServer, test_utils, UserOptions, WaitUntilReady,
+from ycm.vimsupport import ( SetVariableValue,
+                             SIGN_BUFFER_ID_INITIAL_VALUE )
+from ycm.tests import ( StopServer,
+                        test_utils,
+                        UserOptions,
+                        WaitUntilReady,
                         YouCompleteMeInstance )
 from ycm.client.base_request import _LoadExtraConfFile
 from ycm.youcompleteme import YouCompleteMe
@@ -63,7 +73,7 @@ def YouCompleteMe_InvalidPythonInterpreterPath_test( post_vim_message ):
       post_vim_message.assert_called_once_with(
         "Unable to start the ycmd server. "
         "Path in 'g:ycm_server_python_interpreter' option does not point "
-        "to a valid Python 2.7 or 3.4+. "
+        "to a valid Python 2.7 or 3.5+. "
         "Correct the error then restart the server with ':YcmRestartServer'." )
 
       post_vim_message.reset_mock()
@@ -90,7 +100,7 @@ def YouCompleteMe_NoPythonInterpreterFound_test( post_vim_message, *args ):
 
       assert_that( ycm.IsServerAlive(), equal_to( False ) )
       post_vim_message.assert_called_once_with(
-        "Unable to start the ycmd server. Cannot find Python 2.7 or 3.4+. "
+        "Unable to start the ycmd server. Cannot find Python 2.7 or 3.5+. "
         "Set the 'g:ycm_server_python_interpreter' option to a Python "
         "interpreter path. "
         "Correct the error then restart the server with ':YcmRestartServer'." )
@@ -204,15 +214,11 @@ def YouCompleteMe_DebugInfo_ServerRunning_test( ycm ):
         'Client logfile: .+\n'
         'Server Python interpreter: .+\n'
         'Server Python version: .+\n'
-        'Server has Clang support compiled in: '
-        '(?P<CLANG>True)?(?(CLANG)|False)\n'
+        'Server has Clang support compiled in: (False|True)\n'
         'Clang version: .+\n'
         'Extra configuration file found and loaded\n'
         'Extra configuration path: .*testdata[/\\\\]\\.ycm_extra_conf\\.py\n'
-        '(?(CLANG)C-family completer debug information:\n'
-        '  Compilation database path: None\n'
-        '  Flags: \\[u?\'_TEMP_FILE_\'.*\\]\n'
-        '  Translation unit: .+\n)'
+        '[\\w\\W]*'
         'Server running at: .+\n'
         'Server process ID: \\d+\n'
         'Server logfiles:\n'
@@ -537,7 +543,7 @@ def YouCompleteMe_ShowDiagnostics_DiagnosticsFound_OpenLocationList_test(
 @patch( 'ycm.youcompleteme.YouCompleteMe.FiletypeCompleterExistsForFiletype',
         return_value = True )
 @patch( 'ycm.vimsupport.PostVimMessage', new_callable = ExtendedMock )
-def YouCompleteMe_UpdateDiagnosticInterface_PrioritizeErrorsOverWarnings_test(
+def YouCompleteMe_UpdateDiagnosticInterface(
   ycm, post_vim_message, *args ):
 
   contents = """int main() {
@@ -611,6 +617,7 @@ def YouCompleteMe_UpdateDiagnosticInterface_PrioritizeErrorsOverWarnings_test(
 
   test_utils.VIM_MATCHES_FOR_WINDOW.clear()
   test_utils.VIM_SIGNS = []
+  vimsupport.SIGN_ID_FOR_BUFFER.clear()
 
   with MockVimBuffers( [ current_buffer ], [ current_buffer ], ( 3, 1 ) ):
     with patch( 'ycm.client.event_notification.EventNotification.Response',
@@ -684,6 +691,15 @@ def YouCompleteMe_UpdateDiagnosticInterface_PrioritizeErrorsOverWarnings_test(
         VimSign( SIGN_BUFFER_ID_INITIAL_VALUE + 1, 3, 'YcmWarning', 5 )
       )
     )
+
+
+def YouCompleteMe_UpdateDiagnosticInterface_OldVim_test():
+  YouCompleteMe_UpdateDiagnosticInterface()
+
+
+@patch( 'ycm.tests.test_utils.VIM_VERSION', Version( 8, 1, 614 ) )
+def YouCompleteMe_UpdateDiagnosticInterface_NewVim_test():
+  YouCompleteMe_UpdateDiagnosticInterface()
 
 
 @YouCompleteMeInstance( { 'g:ycm_enable_diagnostic_highlighting': 1 } )

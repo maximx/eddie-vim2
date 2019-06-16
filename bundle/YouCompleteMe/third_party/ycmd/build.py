@@ -25,15 +25,16 @@ import sysconfig
 import tarfile
 import tempfile
 
-PY_MAJOR, PY_MINOR, PY_PATCH = sys.version_info[ 0 : 3 ]
-if not ( ( PY_MAJOR == 2 and PY_MINOR == 7 and PY_PATCH >= 1 ) or
-         ( PY_MAJOR == 3 and PY_MINOR >= 4 ) or
-         PY_MAJOR > 3 ):
-  sys.exit( 'ycmd requires Python >= 2.7.1 or >= 3.4; '
+IS_64BIT = sys.maxsize > 2**32
+PY_MAJOR, PY_MINOR = sys.version_info[ 0 : 2 ]
+version = sys.version_info[ 0 : 3 ]
+if version < ( 2, 7, 1 ) or ( 3, 0, 0 ) <= version < ( 3, 5, 1 ):
+  sys.exit( 'ycmd requires Python >= 2.7.1 or >= 3.5.1; '
             'your version of Python is ' + sys.version )
 
 DIR_OF_THIS_SCRIPT = p.dirname( p.abspath( __file__ ) )
 DIR_OF_THIRD_PARTY = p.join( DIR_OF_THIS_SCRIPT, 'third_party' )
+LIBCLANG_DIR = p.join( DIR_OF_THIRD_PARTY, 'clang', 'lib' )
 
 for folder in os.listdir( DIR_OF_THIRD_PARTY ):
   abs_folder_path = p.join( DIR_OF_THIRD_PARTY, folder )
@@ -44,7 +45,14 @@ for folder in os.listdir( DIR_OF_THIRD_PARTY ):
                                                             DIR_OF_THIRD_PARTY )
     )
 
-sys.path.insert( 1, p.abspath( p.join( DIR_OF_THIRD_PARTY, 'requests' ) ) )
+sys.path[ 0:0 ] = [ p.join( DIR_OF_THIRD_PARTY, 'requests_deps', 'requests' ),
+                    p.join( DIR_OF_THIRD_PARTY,
+                            'requests_deps',
+                            'urllib3',
+                            'src' ),
+                    p.join( DIR_OF_THIRD_PARTY, 'requests_deps', 'chardet' ),
+                    p.join( DIR_OF_THIRD_PARTY, 'requests_deps', 'certifi' ),
+                    p.join( DIR_OF_THIRD_PARTY, 'requests_deps', 'idna' ) ]
 
 import requests
 
@@ -60,22 +68,22 @@ NO_PYTHON_HEADERS_ERROR = 'ERROR: Python headers are missing in {include_dir}.'
 # Regular expressions used to find static and dynamic Python libraries.
 # Notes:
 #  - Python 3 library name may have an 'm' suffix on Unix platforms, for
-#    instance libpython3.4m.so;
+#    instance libpython3.5m.so;
 #  - the linker name (the soname without the version) does not always
 #    exist so we look for the versioned names too;
 #  - on Windows, the .lib extension is used instead of the .dll one. See
 #    https://en.wikipedia.org/wiki/Dynamic-link_library#Import_libraries
-STATIC_PYTHON_LIBRARY_REGEX = '^libpython{major}\.{minor}m?\.a$'
+STATIC_PYTHON_LIBRARY_REGEX = '^libpython{major}\\.{minor}m?\\.a$'
 DYNAMIC_PYTHON_LIBRARY_REGEX = """
   ^(?:
   # Linux, BSD
-  libpython{major}\.{minor}m?\.so(\.\d+)*|
+  libpython{major}\\.{minor}m?\\.so(\\.\\d+)*|
   # OS X
-  libpython{major}\.{minor}m?\.dylib|
+  libpython{major}\\.{minor}m?\\.dylib|
   # Windows
-  python{major}{minor}\.lib|
+  python{major}{minor}\\.lib|
   # Cygwin
-  libpython{major}\.{minor}\.dll\.a
+  libpython{major}\\.{minor}\\.dll\\.a
   )$
 """
 
@@ -85,7 +93,7 @@ JDTLS_SHA256 = (
   '37c02deb37335668321643571e7316a231d94d07707325afdb83b16c953f2244'
 )
 
-TSSERVER_VERSION = '3.1.3'
+TSSERVER_VERSION = '3.3.3333'
 
 BUILD_ERROR_MESSAGE = (
   'ERROR: the build failed.\n\n'
@@ -96,6 +104,32 @@ BUILD_ERROR_MESSAGE = (
   'issue tracker, including the entire output of this script\n'
   'and the invocation line used to run it.' )
 
+CLANGD_VERSION = '8.0.0'
+CLANGD_BINARIES_ERROR_MESSAGE = (
+  'No prebuilt Clang {version} binaries for {platform}. '
+  'You\'ll have to compile Clangd {version} from source '
+  'or use your system Clangd. '
+  'See the YCM docs for details on how to use a custom Clangd.' )
+
+
+def MakeCleanDirectory( directory_path ):
+  if p.exists( directory_path ):
+    shutil.rmtree( directory_path )
+  os.makedirs( directory_path )
+
+
+def CheckFileIntegrity( file_path, check_sum ):
+  with open( file_path, 'rb' ) as existing_file:
+    existing_sha256 = hashlib.sha256( existing_file.read() ).hexdigest()
+  return existing_sha256 == check_sum
+
+
+def DownloadFileTo( download_url, file_path ):
+  request = requests.get( download_url, stream = True )
+  with open( file_path, 'wb' ) as package_file:
+    package_file.write( request.content )
+  request.close()
+
 
 def OnMac():
   return platform.system() == 'Darwin'
@@ -103,6 +137,22 @@ def OnMac():
 
 def OnWindows():
   return platform.system() == 'Windows'
+
+
+def OnFreeBSD():
+  return platform.system() == 'FreeBSD'
+
+
+def OnAArch64():
+  return platform.machine().lower().startswith( 'aarch64' )
+
+
+def OnArm():
+  return platform.machine().lower().startswith( 'arm' )
+
+
+def OnX86_64():
+  return platform.machine().lower().startswith( 'x86_64' )
 
 
 def OnCiService():
@@ -133,13 +183,13 @@ def FindExecutable( executable ):
   if OnWindows() and extension.lower() not in WIN_EXECUTABLE_EXTS:
     extensions = WIN_EXECUTABLE_EXTS
   else:
-    extensions = ['']
+    extensions = [ '' ]
 
   for extension in extensions:
     executable_name = executable + extension
     if not os.path.isfile( executable_name ):
       for path in paths:
-        executable_path = os.path.join(path, executable_name )
+        executable_path = os.path.join( path, executable_name )
         if os.path.isfile( executable_path ):
           return executable_path
     else:
@@ -311,15 +361,18 @@ def GetGenerator( args ):
     return 'Ninja'
   if OnWindows():
     return 'Visual Studio {version}{arch}'.format(
-        version = args.msvc,
-        arch = ' Win64' if platform.architecture()[ 0 ] == '64bit' else '' )
+        version = args.msvc, arch = ' Win64' if IS_64BIT else '' )
   return 'Unix Makefiles'
 
 
 def ParseArguments():
   parser = argparse.ArgumentParser()
   parser.add_argument( '--clang-completer', action = 'store_true',
-                       help = 'Enable C-family semantic completion engine.' )
+                       help = 'Enable C-family semantic completion engine '
+                              'through libclang.' )
+  parser.add_argument( '--clangd-completer', action = 'store_true',
+                       help = 'Enable C-family semantic completion engine '
+                              'through clangd lsp server.(EXPERIMENTAL)' )
   parser.add_argument( '--cs-completer', action = 'store_true',
                        help = 'Enable C# semantic completion engine.' )
   parser.add_argument( '--go-completer', action = 'store_true',
@@ -453,16 +506,17 @@ def GetCmakeArgs( parsed_args ):
 
 def RunYcmdTests( args, build_dir ):
   tests_dir = p.join( build_dir, 'ycm', 'tests' )
-  os.chdir( tests_dir )
   new_env = os.environ.copy()
 
   if OnWindows():
-    # We prepend the folder of the ycm_core_tests executable to the PATH
+    # We prepend the ycm_core and Clang third-party directories to the PATH
     # instead of overwriting it so that the executable is able to find the
     # Python library.
-    new_env[ 'PATH' ] = DIR_OF_THIS_SCRIPT + ';' + new_env[ 'PATH' ]
+    new_env[ 'PATH' ] = ( DIR_OF_THIS_SCRIPT + ';' +
+                          LIBCLANG_DIR + ';' +
+                          new_env[ 'PATH' ] )
   else:
-    new_env[ 'LD_LIBRARY_PATH' ] = DIR_OF_THIS_SCRIPT
+    new_env[ 'LD_LIBRARY_PATH' ] = LIBCLANG_DIR
 
   tests_cmd = [ p.join( tests_dir, 'ycm_core_tests' ) ]
   if args.core_tests != '*':
@@ -478,12 +532,14 @@ def RunYcmdBenchmarks( build_dir ):
   new_env = os.environ.copy()
 
   if OnWindows():
-    # We prepend the folder of the ycm_core_tests executable to the PATH
+    # We prepend the ycm_core and Clang third-party directories to the PATH
     # instead of overwriting it so that the executable is able to find the
     # Python library.
-    new_env[ 'PATH' ] = DIR_OF_THIS_SCRIPT + ';' + new_env[ 'PATH' ]
+    new_env[ 'PATH' ] = ( DIR_OF_THIS_SCRIPT + ';' +
+                          LIBCLANG_DIR + ';' +
+                          new_env[ 'PATH' ] )
   else:
-    new_env[ 'LD_LIBRARY_PATH' ] = DIR_OF_THIS_SCRIPT
+    new_env[ 'LD_LIBRARY_PATH' ] = LIBCLANG_DIR
 
   # Note we don't pass the quiet flag here because the output of the benchmark
   # is the only useful info.
@@ -699,29 +755,21 @@ def EnableJavaCompleter( switches ):
       jdtls_package_name = package_name )
   file_name = p.join( CACHE, package_name )
 
-  if p.exists( REPOSITORY ):
-    shutil.rmtree( REPOSITORY )
-
-  os.makedirs( REPOSITORY )
+  MakeCleanDirectory( REPOSITORY )
 
   if not p.exists( CACHE ):
     os.makedirs( CACHE )
-  elif p.exists( file_name ):
-    with open( file_name, 'rb' ) as existing_file:
-      existing_sha256 = hashlib.sha256( existing_file.read() ).hexdigest()
-    if existing_sha256 != JDTLS_SHA256:
-      Print( 'Cached tar file does not match checksum. Removing...' )
-      os.remove( file_name )
+  elif p.exists( file_name ) and not CheckFileIntegrity( file_name,
+                                                         JDTLS_SHA256 ):
+    Print( 'Cached tar file does not match checksum. Removing...' )
+    os.remove( file_name )
 
 
   if p.exists( file_name ):
     Print( 'Using cached jdt.ls: {0}'.format( file_name ) )
   else:
     Print( "Downloading jdt.ls from {0}...".format( url ) )
-    request = requests.get( url, stream = True )
-    with open( file_name, 'wb' ) as package_file:
-      package_file.write( request.content )
-    request.close()
+    DownloadFileTo( url, file_name )
 
   Print( "Extracting jdt.ls to {0}...".format( REPOSITORY ) )
   with tarfile.open( file_name ) as package_tar:
@@ -743,22 +791,114 @@ def EnableTypeScriptCompleter( args ):
                               'and TypeScript completion' )
 
 
+def GetClangdTarget():
+  if OnWindows():
+    return [
+      ( 'clangd-{version}-win64',
+        'fddbef35131212feda9bf2aa4a779c635abbace09763ab709dca236ea177611d' ),
+      ( 'clangd-{version}-win32',
+        '1ae8ad2e40ef2bc7798f8201ff5b071adab27a708f869568b9aabf5f9e5f02ad' ) ]
+  if OnMac():
+    return [
+      ( 'clangd-{version}-x86_64-apple-darwin',
+        'c0e8017b445db2fbd2d0b42c47ea2f711a8774320894585bc0fa2d2e0c04059f' ) ]
+  if OnFreeBSD():
+    return [
+      ( 'clangd-{version}-amd64-unknown-freebsd11',
+        'b31c93c280a7f543536715a4706ba3dda2583cd96cf2c34a6b84648773cabbf5' ),
+      ( 'clangd-{version}-i386-unknown-freebsd11',
+        'f48c9a5d2997d387a6473115e131d45a9ee764e6f149bed89d4f3ded336a7f00' ) ]
+  if OnAArch64():
+    return [
+      ( 'clangd-{version}-aarch64-linux-gnu',
+        '32de29f3dc735a7e2557f936d8d81438be367e1e4771088c44c8824b07963d04' ) ]
+  if OnArm():
+    return [
+      ( 'clangd-{version}-armv7a-linux-gnueabihf',
+        '711b80610d477fd4c830a43725b644901c58e9c825f09233b9f9d7382b2c2882' ) ]
+  if OnX86_64():
+    return [
+      ( 'clangd-{version}-x86_64-unknown-linux-gnu',
+        '29b2af2775ec3b7e70a64197bf49fd876903732ff038bb5de2486d1194af7817' ) ]
+  sys.exit( CLANGD_BINARIES_ERROR_MESSAGE.format( version = CLANGD_VERSION,
+                                                  platform = 'this system' ) )
+
+
+def DownloadClangd( printer ):
+  CLANGD_DIR = p.join( DIR_OF_THIRD_PARTY, 'clangd', )
+  CLANGD_CACHE_DIR = p.join( CLANGD_DIR, 'cache' )
+  CLANGD_OUTPUT_DIR = p.join( CLANGD_DIR, 'output' )
+
+  target = GetClangdTarget()
+  target_name, check_sum = target[ not IS_64BIT ]
+  target_name = target_name.format( version = CLANGD_VERSION )
+  file_name = '{}.tar.bz2'.format( target_name )
+  download_url = 'https://dl.bintray.com/micbou/clangd/{}'.format( file_name )
+
+  file_name = p.join( CLANGD_CACHE_DIR, file_name )
+
+  MakeCleanDirectory( CLANGD_OUTPUT_DIR )
+
+  if not p.exists( CLANGD_CACHE_DIR ):
+    os.makedirs( CLANGD_CACHE_DIR )
+  elif p.exists( file_name ) and not CheckFileIntegrity( file_name, check_sum ):
+    printer( 'Cached Clangd archive does not match checksum. Removing...' )
+    os.remove( file_name )
+
+  if p.exists( file_name ):
+    printer( 'Using cached Clangd: {}'.format( file_name ) )
+  else:
+    printer( "Downloading Clangd from {}...".format( download_url ) )
+    DownloadFileTo( download_url, file_name )
+    if not CheckFileIntegrity( file_name, check_sum ):
+      sys.exit( 'ERROR: downloaded Clangd archive does not match checksum.' )
+
+  printer( "Extracting Clangd to {}...".format( CLANGD_OUTPUT_DIR ) )
+  with tarfile.open( file_name ) as package_tar:
+    package_tar.extractall( CLANGD_OUTPUT_DIR )
+
+  printer( "Done installing Clangd" )
+
+
+def EnableClangdCompleter( Args ):
+  if Args.quiet:
+    sys.stdout.write( 'Setting up Clangd completer...' )
+    sys.stdout.flush()
+
+  def Print( msg ):
+    if not Args.quiet:
+      print( msg )
+
+  DownloadClangd( Print )
+
+  if Args.quiet:
+    print( 'OK' )
+
+
 def WritePythonUsedDuringBuild():
   path = p.join( DIR_OF_THIS_SCRIPT, 'PYTHON_USED_DURING_BUILDING' )
   with open( path, 'w' ) as f:
     f.write( sys.executable )
 
 
-def Main():
-  args = ParseArguments()
+def DoCmakeBuilds( args ):
   cmake = FindCmake()
   cmake_common_args = GetCmakeCommonArgs( args )
+
   if not args.skip_build:
     ExitIfYcmdLibInUseOnWindows()
     BuildYcmdLib( cmake, cmake_common_args, args )
     WritePythonUsedDuringBuild()
+
   if not args.no_regex:
     BuildRegexModule( cmake, cmake_common_args, args )
+
+
+def Main():
+  args = ParseArguments()
+
+  if not args.skip_build or not args.no_regex:
+    DoCmakeBuilds( args )
   if args.cs_completer or args.omnisharp_completer or args.all_completers:
     EnableCsCompleter( args )
   if args.go_completer or args.gocode_completer or args.all_completers:
@@ -771,6 +911,8 @@ def Main():
     EnableJavaCompleter( args )
   if args.ts_completer or args.all_completers:
     EnableTypeScriptCompleter( args )
+  if args.clangd_completer:
+    EnableClangdCompleter( args )
 
 
 if __name__ == '__main__':
