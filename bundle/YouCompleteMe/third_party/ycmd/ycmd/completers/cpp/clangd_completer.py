@@ -26,8 +26,10 @@ import logging
 import os
 import subprocess
 
-from ycmd import responses
-from ycmd.completers.completer_utils import GetFileLines
+from ycmd import extra_conf_store, responses
+from ycmd.completers.cpp.flags import ( AddMacIncludePaths,
+                                        RemoveUnusedFlags,
+                                        ShouldAllowWinStyleFlags )
 from ycmd.completers.language_server import simple_language_server_completer
 from ycmd.completers.language_server import language_server_completer
 from ycmd.completers.language_server import language_server_protocol as lsp
@@ -36,9 +38,11 @@ from ycmd.utils import ( CLANG_RESOURCE_DIR,
                          ExpandVariablesInPath,
                          FindExecutable,
                          LOGGER,
+                         OnMac,
+                         PathsToAllParentFolders,
                          re )
 
-MIN_SUPPORTED_VERSION = '7.0.0'
+MIN_SUPPORTED_VERSION = ( 9, 0, 0 )
 INCLUDE_REGEX = re.compile(
   '(\\s*#\\s*(?:include|import)\\s*)(?:"[^"]*|<[^>]*)' )
 NOT_CACHED = 'NOT_CACHED'
@@ -55,39 +59,21 @@ PRE_BUILT_CLANGD_DIR = os.path.abspath( os.path.join(
 PRE_BUILT_CLANDG_PATH = os.path.join( PRE_BUILT_CLANGD_DIR, 'clangd' )
 
 
-def DistanceOfPointToRange( point, range ):
-  """Calculate the distance from a point to a range.
-
-  Assumes point is covered by lines in the range.
-  Returns 0 if point is already inside range. """
-  start = range[ 'start' ]
-  end = range[ 'end' ]
-
-  # Single-line range.
-  if start[ 'line' ] == end[ 'line' ]:
-    # 0 if point is within range, otherwise distance from start/end.
-    return max( 0, point[ 'character' ] - end[ 'character' ],
-                start[ 'character' ] - point[ 'character' ] )
-
-  if start[ 'line' ] == point[ 'line' ]:
-    return max( 0, start[ 'character' ] - point[ 'character' ] )
-  if end[ 'line' ] == point[ 'line' ]:
-    return max( 0, point[ 'character' ] - end[ 'character' ] )
-  # If not on the first or last line, then point is within range for sure.
-  return 0
+def ParseClangdVersion( version_str ):
+  version_regexp = r'(\d+)\.(\d+)\.(\d+)'
+  m = re.search( version_regexp, version_str )
+  try:
+    version = tuple( int( x ) for x in m.groups() )
+  except AttributeError:
+    # Custom builds might have different versioning info.
+    version = None
+  return version
 
 
 def GetVersion( clangd_path ):
   args = [ clangd_path, '--version' ]
   stdout, _ = subprocess.Popen( args, stdout=subprocess.PIPE ).communicate()
-  version_regexp = r'(\d\.\d\.\d)'
-  m = re.search( version_regexp, stdout.decode() )
-  try:
-    version = m.group( 1 )
-  except AttributeError:
-    # Custom builds might have different versioning info.
-    version = None
-  return version
+  return ParseClangdVersion( stdout.decode() )
 
 
 def CheckClangdVersion( clangd_path ):
@@ -200,6 +186,29 @@ def ShouldEnableClangdCompleter( user_options ):
   return True
 
 
+def PrependCompilerToFlags( flags, enable_windows_style_flags ):
+  """Removes everything before the first flag and returns the remaining flags
+  prepended with clang-tool."""
+  for index, flag in enumerate( flags ):
+    if ( flag.startswith( '-' ) or
+         ( enable_windows_style_flags and
+           flag.startswith( '/' ) and
+           not os.path.exists( flag ) ) ):
+      flags = flags[ index: ]
+      break
+  return [ 'clang-tool' ] + flags
+
+
+def BuildCompilationCommand( flags, filepath ):
+  """Returns a compilation command from a list of flags and a file."""
+  enable_windows_style_flags = ShouldAllowWinStyleFlags( flags )
+  flags = PrependCompilerToFlags( flags, enable_windows_style_flags )
+  flags = RemoveUnusedFlags( flags, filepath, enable_windows_style_flags )
+  if OnMac():
+    flags = AddMacIncludePaths( flags )
+  return flags + [ filepath ]
+
+
 class ClangdCompleter( simple_language_server_completer.SimpleLSPCompleter ):
   """A LSP-based completer for C-family languages, powered by Clangd.
 
@@ -214,14 +223,33 @@ class ClangdCompleter( simple_language_server_completer.SimpleLSPCompleter ):
 
     self._clangd_command = GetClangdCommand( user_options )
     self._use_ycmd_caching = user_options[ 'clangd_uses_ycmd_caching' ]
+    self._compilation_commands = {}
+
+    self.RegisterOnFileReadyToParse(
+      lambda self, request_data: self._SendFlagsFromExtraConf( request_data )
+    )
+
+
+  def _Reset( self ):
+    with self._server_state_mutex:
+      super( ClangdCompleter, self )._Reset()
+      self._compilation_commands = {}
+
+
+  def GetCompleterName( self ):
+    return 'C-family'
 
 
   def GetServerName( self ):
-    return 'clangd'
+    return 'Clangd'
 
 
   def GetCommandLine( self ):
     return self._clangd_command
+
+
+  def Language( self ):
+    return 'cfamily'
 
 
   def SupportedFiletypes( self ):
@@ -229,11 +257,31 @@ class ClangdCompleter( simple_language_server_completer.SimpleLSPCompleter ):
 
 
   def GetType( self, request_data ):
-    hover_response = self.GetHoverResponse( request_data )
-    return responses.BuildDisplayMessageResponse( hover_response[ 'value' ] )
+    try:
+      # Clangd's hover response looks like this:
+      #     Declared in namespace <namespace name>
+      #
+      #     <declaration line>
+      #
+      #     <docstring>
+      # GetType gets the first two lines.
+      hover_value = self.GetHoverResponse( request_data )[ 'value' ]
+      type_info = '\n\n'.join( hover_value.split( '\n\n', 2 )[ : 2 ] )
+      return responses.BuildDisplayMessageResponse( type_info )
+    except language_server_completer.NoHoverInfoException:
+      raise RuntimeError( 'Unknown type.' )
 
 
-  def _GetTriggerCharacters( self, server_trigger_characters ):
+  def GetDoc( self, request_data ):
+    try:
+      # Just pull `value` out of the textDocument/hover response
+      return responses.BuildDetailedInfoResponse(
+          self.GetHoverResponse( request_data )[ 'value' ] )
+    except language_server_completer.NoHoverInfoException:
+      raise RuntimeError( 'No documentation available.' )
+
+
+  def GetTriggerCharacters( self, server_trigger_characters ):
     # The trigger characters supplied by clangd are worse than ycmd's own
     # semantic triggers which are more sophisticated (regex-based). So we
     # ignore them.
@@ -242,14 +290,6 @@ class ClangdCompleter( simple_language_server_completer.SimpleLSPCompleter ):
 
   def GetCustomSubcommands( self ):
     return {
-      'FixIt': (
-        lambda self, request_data, args: self.GetCodeActions( request_data,
-                                                              args )
-      ),
-      'GetType': (
-        # In addition to type information we show declaration.
-        lambda self, request_data, args: self.GetType( request_data )
-      ),
       'GetTypeImprecise': (
         lambda self, request_data, args: self.GetType( request_data )
       ),
@@ -263,28 +303,15 @@ class ClangdCompleter( simple_language_server_completer.SimpleLSPCompleter ):
         lambda self, request_data, args: self.GoTo( request_data,
                                                     [ 'Definition' ] )
       ),
-      'RestartServer': (
-        lambda self, request_data, args: self._RestartServer( request_data )
+      'GetDocImprecise': (
+        lambda self, request_data, args: self.GetDoc( request_data )
       ),
       # To handle the commands below we need extensions to LSP. One way to
       # provide those could be to use workspace/executeCommand requset.
-      # 'GetDoc': (
-      #   lambda self, request_data, args: self.GetType( request_data )
-      # ),
       # 'GetParent': (
       #   lambda self, request_data, args: self.GetType( request_data )
       # )
     }
-
-
-  def HandleServerCommand( self, request_data, command ):
-    if command[ 'command' ] == 'clangd.applyFix':
-      return language_server_completer.WorkspaceEditToFixIt(
-        request_data,
-        command[ 'arguments' ][ 0 ],
-        text = command[ 'title' ] )
-
-    return None
 
 
   def ShouldCompleteIncludeStatement( self, request_data ):
@@ -323,41 +350,75 @@ class ClangdCompleter( simple_language_server_completer.SimpleLSPCompleter ):
     return candidates
 
 
-  def GetDetailedDiagnostic( self, request_data ):
-    self._UpdateServerWithFileContents( request_data )
-
-    current_line_lsp = request_data[ 'line_num' ] - 1
-    current_file = request_data[ 'filepath' ]
-
-    if not self._latest_diagnostics:
-      return responses.BuildDisplayMessageResponse(
-          'Diagnostics are not ready yet.' )
+  def _SendFlagsFromExtraConf( self, request_data ):
+    """Reads the flags from the extra conf of the given request and sends them
+    to Clangd as an entry of a compilation database using the
+    'compilationDatabaseChanges' configuration."""
+    filepath = request_data[ 'filepath' ]
 
     with self._server_info_mutex:
-      diagnostics = list( self._latest_diagnostics[
-          lsp.FilePathToUri( current_file ) ] )
+      # Replicate the logic from flags.py _GetFlagsFromCompilationDatabase:
+      #  - if there's a local extra conf, use it
+      #  - otherwise if there's no database, try and use a global extra conf
 
-    if not diagnostics:
-      return responses.BuildDisplayMessageResponse(
-          'No diagnostics for current file.' )
+      module = extra_conf_store.ModuleForSourceFile( filepath )
+      if not module:
+        # No extra conf and no global extra conf. Just let clangd handle it.
+        return
 
-    current_column = lsp.CodepointsToUTF16CodeUnits(
-        GetFileLines( request_data, current_file )[ current_line_lsp ],
-        request_data[ 'column_codepoint' ] )
-    minimum_distance = None
+      if ( extra_conf_store.IsGlobalExtraConfModule( module ) and
+           CompilationDatabaseExists( filepath ) ):
+        # No local extra conf, database exists: use database (i.e. clangd)
+        return
 
-    message = 'No diagnostics for current line.'
-    for diagnostic in diagnostics:
-      start = diagnostic[ 'range' ][ 'start' ]
-      end = diagnostic[ 'range' ][ 'end' ]
-      if current_line_lsp < start[ 'line' ] or end[ 'line' ] < current_line_lsp:
-        continue
-      point = { 'line': current_line_lsp, 'character': current_column }
-      distance = DistanceOfPointToRange( point, diagnostic[ 'range' ] )
-      if minimum_distance is None or distance < minimum_distance:
-        message = diagnostic[ 'message' ]
-        if distance == 0:
-          break
-        minimum_distance = distance
+      # Use our module (either local extra conf or global extra conf when no
+      # database is found)
+      settings = self.GetSettings( module, request_data )
 
-    return responses.BuildDisplayMessageResponse( message )
+      if 'flags' not in settings:
+        # No flags returned. Let Clangd find the flags.
+        return
+
+      if ( settings.get( 'do_cache', True ) and
+           filepath in self._compilation_commands ):
+        # Flags for this file have already been sent to Clangd.
+        return
+
+      flags = BuildCompilationCommand( settings[ 'flags' ], filepath )
+
+      self.GetConnection().SendNotification( lsp.DidChangeConfiguration( {
+        'compilationDatabaseChanges': {
+          filepath: {
+            'compilationCommand': flags,
+            'workingDirectory': settings.get( 'include_paths_relative_to_dir',
+                                              self._project_directory )
+          }
+        }
+      } ) )
+
+      self._compilation_commands[ filepath ] = flags
+
+
+  def ExtraDebugItems( self, request_data ):
+    return [
+      responses.DebugInfoItem(
+        'Compilation Command',
+        self._compilation_commands.get( request_data[ 'filepath' ], False ) )
+    ]
+
+
+  def OnBufferVisit( self, request_data ):
+    # In case a header has been changed, we need to make clangd reparse the TU.
+    file_state = self._server_file_state[ request_data[ 'filepath' ] ]
+    if file_state.state == lsp.ServerFileState.OPEN:
+      msg = lsp.DidChangeTextDocument( file_state, None )
+      self.GetConnection().SendNotification( msg )
+
+
+
+def CompilationDatabaseExists( file_dir ):
+  for folder in PathsToAllParentFolders( file_dir ):
+    if os.path.exists( os.path.join( folder, 'compile_commands.json' ) ):
+      return True
+
+  return False

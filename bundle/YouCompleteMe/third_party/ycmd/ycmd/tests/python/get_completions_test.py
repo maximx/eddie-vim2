@@ -200,7 +200,8 @@ def GetCompletions_Unicode_InLine_test( app ):
       'response': requests.codes.ok,
       'data': has_entries( {
         'completions': contains(
-          CompletionEntryMatcher( 'center', 'def center(width, fillchar)' )
+          CompletionEntryMatcher(
+            'center', 'def center(width: int, fillchar: str=...)' )
         ),
         'errors': empty()
       } )
@@ -232,6 +233,33 @@ def GetCompletions_SysPath_EmptyExtraConf_test( app ):
 @IsolatedYcmd( { 'global_ycm_extra_conf':
                  PathToTestFile( 'project', 'settings_extra_conf.py' ) } )
 def GetCompletions_SysPath_SettingsFunctionInExtraConf_test( app ):
+  RunTest( app, {
+    'description': 'Module is added to sys.path through the Settings '
+                   'function in extra conf file',
+    'request': {
+      'filetype'  : 'python',
+      'filepath'  : PathToTestFile( 'project', '__main__.py' ),
+      'line_num'  : 3,
+      'column_num': 8
+    },
+    'expect': {
+      'response': requests.codes.ok,
+      'data': has_entries( {
+        'completions': has_item(
+          CompletionEntryMatcher( 'SOME_CONSTANT', 'SOME_CONSTANT = 1' )
+        ),
+        'errors': empty()
+      } )
+    }
+  } )
+
+
+@IsolatedYcmd( {
+  'global_ycm_extra_conf': PathToTestFile( 'project',
+                                           'settings_extra_conf.py' ),
+  'disable_signature_help': True
+} )
+def GetCompletions_SysPath_SettingsFunctionInExtraConf_DisableSig_test( app ):
   RunTest( app, {
     'description': 'Module is added to sys.path through the Settings '
                    'function in extra conf file',

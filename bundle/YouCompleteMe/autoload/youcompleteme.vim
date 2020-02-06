@@ -25,10 +25,16 @@ let s:force_semantic = 0
 let s:completion_stopped = 0
 " These two variables are initialized in youcompleteme#Enable.
 let s:default_completion = {}
-let s:completion = {}
+let s:completion = s:default_completion
+let s:default_signature_help = {}
+let s:signature_help = s:default_completion
 let s:previous_allowed_buffer_number = 0
 let s:pollers = {
       \   'completion': {
+      \     'id': -1,
+      \     'wait_milliseconds': 10
+      \   },
+      \   'signature_help': {
       \     'id': -1,
       \     'wait_milliseconds': 10
       \   },
@@ -88,7 +94,11 @@ endfunction
 
 
 function! s:ReceiveMessages( timer_id )
-  let poll_again = s:Pyeval( 'ycm_state.OnPeriodicTick()' )
+  let poll_again = v:false
+  if s:AllowedToCompleteInCurrentBuffer()
+    let poll_again = s:Pyeval( 'ycm_state.OnPeriodicTick()' )
+  endif
+
 
   if poll_again
     let s:pollers.receive_messages.id = timer_start(
@@ -142,6 +152,9 @@ function! youcompleteme#Enable()
     autocmd InsertLeave * call s:OnInsertLeave()
     autocmd VimLeave * call s:OnVimLeave()
     autocmd CompleteDone * call s:OnCompleteDone()
+    if exists( '##CompleteChanged' )
+      autocmd CompleteChanged * call s:OnCompleteChanged()
+    endif
     autocmd BufEnter,WinEnter * call s:UpdateMatches()
   augroup END
 
@@ -153,6 +166,15 @@ function! youcompleteme#Enable()
 
   let s:default_completion = s:Pyeval( 'vimsupport.NO_COMPLETIONS' )
   let s:completion = s:default_completion
+
+  if exists( '*prop_type_add' ) && exists( '*prop_type_delete' )
+    call prop_type_delete( 'YCM-signature-help-current-argument' )
+    call prop_type_add( 'YCM-signature-help-current-argument', {
+          \   'highlight': 'PMenuSel',
+          \   'combine':   0,
+          \   'priority':  50,
+          \ } )
+  endif
 endfunction
 
 
@@ -249,6 +271,11 @@ try:
   # Import the modules used in this file.
   from ycm import base, vimsupport, youcompleteme
 
+  if 'ycm_state' in globals():
+    # If re-initializing, pretend that we shut down
+    ycm_state.OnVimLeave()
+    del ycm_state
+
   ycm_state = youcompleteme.YouCompleteMe()
 except Exception as error:
   # We don't use PostVimMessage or EchoText from the vimsupport module because
@@ -314,7 +341,7 @@ function! s:SetUpKeyMappings()
     endif
 
     silent! exe 'inoremap <unique> <silent> ' . invoke_key .
-          \ ' <C-R>=<SID>InvokeSemanticCompletion()<CR>'
+          \ ' <C-R>=<SID>RequestSemanticCompletion()<CR>'
   endif
 
   if !empty( g:ycm_key_detailed_diagnostics )
@@ -431,6 +458,14 @@ function! s:DisableOnLargeFile( buffer )
   return b:ycm_largefile
 endfunction
 
+function! s:HasAnyKey( dict, keys )
+  for key in a:keys
+    if has_key( a:dict, key )
+      return 1
+    endif
+  endfor
+  return 0
+endfunction
 
 function! s:AllowedToCompleteInBuffer( buffer )
   let buftype = getbufvar( a:buffer, '&buftype' )
@@ -447,9 +482,9 @@ function! s:AllowedToCompleteInBuffer( buffer )
 
   let whitelist_allows = type( g:ycm_filetype_whitelist ) != type( {} ) ||
         \ has_key( g:ycm_filetype_whitelist, '*' ) ||
-        \ has_key( g:ycm_filetype_whitelist, filetype )
+        \ s:HasAnyKey( g:ycm_filetype_whitelist, split( filetype, '\.' ) )
   let blacklist_allows = type( g:ycm_filetype_blacklist ) != type( {} ) ||
-        \ !has_key( g:ycm_filetype_blacklist, filetype )
+        \ !s:HasAnyKey( g:ycm_filetype_blacklist, split( filetype, '\.' ) )
 
   let allowed = whitelist_allows && blacklist_allows
   if allowed
@@ -513,11 +548,17 @@ function! s:SetCompleteFunc()
 endfunction
 
 
+function s:StopPoller( poller ) abort
+  call timer_stop( a:poller.id )
+  let a:poller.id = -1
+endfunction
+
+
 function! s:OnVimLeave()
   " Workaround a NeoVim issue - not shutting down timers correctly
   " https://github.com/neovim/neovim/issues/6840
   for poller in values( s:pollers )
-    call timer_stop( poller.id )
+    call s:StopPoller( poller )
   endfor
   exec s:python_command "ycm_state.OnVimLeave()"
 endfunction
@@ -529,6 +570,16 @@ function! s:OnCompleteDone()
   endif
 
   exec s:python_command "ycm_state.OnCompleteDone()"
+  call s:UpdateSignatureHelp()
+endfunction
+
+
+function! s:OnCompleteChanged()
+  if !s:AllowedToCompleteInCurrentBuffer()
+    return
+  endif
+
+  call s:UpdateSignatureHelp()
 endfunction
 
 
@@ -548,19 +599,19 @@ function! s:OnFileTypeSet()
   call s:SetCompleteFunc()
   call s:StartMessagePoll()
 
-  exec s:python_command "ycm_state.OnBufferVisit()"
+  exec s:python_command "ycm_state.OnFileTypeSet()"
   call s:OnFileReadyToParse( 1 )
 endfunction
 
 
 function! s:OnBufferEnter()
+  call s:StartMessagePoll()
   if !s:VisitedBufferRequiresReparse()
     return
   endif
 
   call s:SetUpCompleteopt()
   call s:SetCompleteFunc()
-  call s:StartMessagePoll()
 
   exec s:python_command "ycm_state.OnBufferVisit()"
   " Last parse may be outdated because of changes from other buffers. Force a
@@ -613,9 +664,12 @@ function! s:OnFileReadyToParse( ... )
   " We only want to send a new FileReadyToParse event notification if the buffer
   " has changed since the last time we sent one, or if forced.
   if force_parsing || s:Pyeval( "ycm_state.NeedsReparse()" )
+    " We switched buffers or somethuing, so claer.
+    " FIXME: sig hekp should be buffer local?
+    call s:ClearSignatureHelp()
     exec s:python_command "ycm_state.OnFileReadyToParse()"
 
-    call timer_stop( s:pollers.file_parse_response.id )
+    call s:StopPoller( s:pollers.file_parse_response )
     let s:pollers.file_parse_response.id = timer_start(
           \ s:pollers.file_parse_response.wait_milliseconds,
           \ function( 's:PollFileParseResponse' ) )
@@ -662,8 +716,10 @@ function! s:OnInsertChar()
     return
   endif
 
-  call timer_stop( s:pollers.completion.id )
+  call s:StopPoller( s:pollers.completion )
   call s:CloseCompletionMenu()
+
+  call s:StopPoller( s:pollers.signature_help )
 endfunction
 
 
@@ -672,7 +728,8 @@ function! s:OnDeleteChar( key )
     return a:key
   endif
 
-  call timer_stop( s:pollers.completion.id )
+  call s:StopPoller( s:pollers.completion )
+  call s:StopPoller( s:pollers.signature_help )
   if pumvisible()
     return "\<C-y>" . a:key
   endif
@@ -681,7 +738,10 @@ endfunction
 
 
 function! s:StopCompletion( key )
-  call timer_stop( s:pollers.completion.id )
+  call s:StopPoller( s:pollers.completion )
+
+  call s:ClearSignatureHelp()
+
   if pumvisible()
     let s:completion_stopped = 1
     return "\<C-y>"
@@ -734,7 +794,10 @@ function! s:OnTextChangedInsertMode()
         \ !s:OnBlankLine()
     " Immediately call previous completion to avoid flickers.
     call s:Complete()
-    call s:InvokeCompletion()
+    call s:RequestCompletion()
+
+    call s:UpdateSignatureHelp()
+    call s:RequestSignatureHelp()
   endif
 
   exec s:python_command "ycm_state.OnCursorMoved()"
@@ -750,7 +813,7 @@ function! s:OnInsertLeave()
     return
   endif
 
-  call timer_stop( s:pollers.completion.id )
+  call s:StopPoller( s:pollers.completion )
   let s:force_semantic = 0
   let s:completion = s:default_completion
 
@@ -760,6 +823,8 @@ function! s:OnInsertLeave()
         \ g:ycm_autoclose_preview_window_after_insertion
     call s:ClosePreviewWindowIfNeeded()
   endif
+
+  call s:ClearSignatureHelp()
 endfunction
 
 
@@ -827,7 +892,7 @@ function! s:OnBlankLine()
 endfunction
 
 
-function! s:InvokeCompletion()
+function! s:RequestCompletion()
   exec s:python_command "ycm_state.SendCompletionRequest(" .
         \ "vimsupport.GetBoolValue( 's:force_semantic' ) )"
 
@@ -835,7 +900,7 @@ function! s:InvokeCompletion()
 endfunction
 
 
-function! s:InvokeSemanticCompletion()
+function! s:RequestSemanticCompletion()
   if &completefunc == "youcompleteme#CompleteFunc"
     let s:force_semantic = 1
     exec s:python_command "ycm_state.SendCompletionRequest( True )"
@@ -863,6 +928,50 @@ function! s:PollCompletion( ... )
 endfunction
 
 
+function! s:ShouldUseSignatureHelp()
+  return s:Pyeval( 'vimsupport.VimSupportsPopupWindows()' )
+endfunction
+
+
+function! s:RequestSignatureHelp()
+  if !s:ShouldUseSignatureHelp()
+    return
+  endif
+
+  if s:pollers.signature_help.id >= 0
+    " We're already polling.
+    return
+  endif
+
+  if s:Pyeval( 'ycm_state.SendSignatureHelpRequest()' )
+    call s:PollSignatureHelp()
+  endif
+endfunction
+
+
+function! s:PollSignatureHelp( ... )
+  if !s:ShouldUseSignatureHelp()
+    return
+  endif
+
+  if a:0 == 0 && s:pollers.signature_help.id >= 0
+    " OK this is a bug. We have tried to poll for a response while the timer is
+    " already running. Just return and wait for the timer to fire.
+    return
+  endif
+
+  if !s:Pyeval( 'ycm_state.SignatureHelpRequestReady()' )
+    let s:pollers.signature_help.id = timer_start(
+          \ s:pollers.signature_help.wait_milliseconds,
+          \ function( 's:PollSignatureHelp' ) )
+    return
+  endif
+
+  let s:signature_help = s:Pyeval( 'ycm_state.GetSignatureHelpResponse()' )
+  call s:UpdateSignatureHelp()
+endfunction
+
+
 function! s:Complete()
   " Do not call user's completion function if the start column is after the
   " current column or if there are no candidates. Close the completion menu
@@ -880,6 +989,8 @@ function! s:Complete()
     " text until he explicitly chooses to replace it with a completion.
     call s:SendKeys( "\<C-X>\<C-U>\<C-P>" )
   endif
+  " Displaying or hiding the PUM might mean we need to hide the sig help
+  call s:UpdateSignatureHelp()
 endfunction
 
 
@@ -904,6 +1015,27 @@ function! youcompleteme#CompleteFunc( findstart, base )
     return s:completion.completion_start_column - 1
   endif
   return s:completion.completions
+endfunction
+
+
+function! s:UpdateSignatureHelp()
+  if !s:ShouldUseSignatureHelp()
+    return
+  endif
+
+  call s:Pyeval(
+        \ 'ycm_state.UpdateSignatureHelp( vim.eval( "s:signature_help" ) )' )
+endfunction
+
+
+function! s:ClearSignatureHelp()
+  if !s:ShouldUseSignatureHelp()
+    return
+  endif
+
+  call s:StopPoller( s:pollers.signature_help )
+  let s:signature_help = s:default_signature_help
+  call s:Pyeval( 'ycm_state.ClearSignatureHelp()' )
 endfunction
 
 
@@ -943,10 +1075,10 @@ function! s:RestartServer()
 
   exec s:python_command "ycm_state.RestartServer()"
 
-  call timer_stop( s:pollers.receive_messages.id )
-  let s:pollers.receive_messages.id = -1
+  call s:StopPoller( s:pollers.receive_messages )
+  call s:ClearSignatureHelp()
 
-  call timer_stop( s:pollers.server_ready.id )
+  call s:StopPoller( s:pollers.server_ready )
   let s:pollers.server_ready.id = timer_start(
         \ s:pollers.server_ready.wait_milliseconds,
         \ function( 's:PollServerReady' ) )

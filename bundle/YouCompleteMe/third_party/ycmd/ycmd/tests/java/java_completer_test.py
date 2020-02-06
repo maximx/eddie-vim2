@@ -60,15 +60,22 @@ def ShouldEnableJavaCompleter_NoLauncherJar_test( glob ):
 
 def WorkspaceDirForProject_HashProjectDir_test():
   assert_that(
-    java_completer._WorkspaceDirForProject( os.getcwd(), False ),
-    equal_to( java_completer._WorkspaceDirForProject( os.getcwd(), False ) )
+    java_completer._WorkspaceDirForProject( os.getcwd(),
+                                            os.getcwd(),
+                                            False ),
+    equal_to( java_completer._WorkspaceDirForProject( os.getcwd(),
+                                                      os.getcwd(),
+                                                      False ) )
   )
 
 
 def WorkspaceDirForProject_UniqueDir_test():
   assert_that(
-    java_completer._WorkspaceDirForProject( os.getcwd(), True ),
+    java_completer._WorkspaceDirForProject( os.getcwd(),
+                                            os.getcwd(),
+                                            True ),
     is_not( equal_to( java_completer._WorkspaceDirForProject( os.getcwd(),
+                                                              os.getcwd(),
                                                               True ) ) )
   )
 
@@ -209,19 +216,6 @@ def JavaCompleter_GetDoc_test( app ):
                      return_value = { 'kind': 'plaintext', 'value': 'test' } ):
     assert_that( calling( completer.GetDoc ).with_args( BuildRequest() ),
                  raises( RuntimeError, NO_DOCUMENTATION_MESSAGE ) )
-
-
-@SharedYcmd
-def JavaCompleter_UnknownCommand_test( app ):
-  completer = handlers._server_state.GetFiletypeCompleter( [ 'java' ] )
-
-  notification = {
-    'command': 'this_is_not_a_real_command',
-    'params': {}
-  }
-  assert_that( completer.HandleServerCommand( BuildRequest(), notification ),
-               equal_to( None ) )
-
 
 
 @patch( 'ycmd.completers.java.hook.ShouldEnableJavaCompleter',

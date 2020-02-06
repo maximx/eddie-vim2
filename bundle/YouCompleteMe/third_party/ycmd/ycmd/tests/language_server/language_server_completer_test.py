@@ -1,4 +1,4 @@
-# Copyright (C) 2017 ycmd contributors
+# Copyright (C) 2017-2019 ycmd contributors
 #
 # This file is part of ycmd.
 #
@@ -40,6 +40,7 @@ from hamcrest import ( all_of,
 
 from ycmd.completers.language_server import language_server_completer as lsc
 from ycmd.completers.language_server.language_server_completer import (
+    NoHoverInfoException,
     NO_HOVER_INFORMATION )
 from ycmd.completers.language_server import language_server_protocol as lsp
 from ycmd.tests.language_server import MockConnection
@@ -83,6 +84,10 @@ class MockCompleter( lsc.LanguageServerCompleter, DummyCompleter ):
 
   def ServerIsHealthy( self ):
     return self._started
+
+
+  def _RestartServer( self, request_data ):
+    pass
 
 
 @IsolatedYcmd( { 'global_ycm_extra_conf':
@@ -300,7 +305,7 @@ def LanguageServerCompleter_GoTo_test():
     column_num = 3
   ) )
 
-  @patch.object( completer, 'ServerIsReady', return_value = True )
+  @patch.object( completer, '_ServerIsInitialized', return_value = True )
   def Test( responses, command, exception, throws, *args ):
     with patch.object( completer.GetConnection(),
                        'GetResponse',
@@ -546,10 +551,47 @@ def WorkspaceEditToFixIt_test():
   ) )
 
 
-  # We don't support versioned documentChanges
-  assert_that( lsc.WorkspaceEditToFixIt( request_data,
-                                         { 'documentChanges': [] } ),
+  # Null response to textDocument/codeActions is valid
+  assert_that( lsc.WorkspaceEditToFixIt( request_data, None ),
                equal_to( None ) )
+  # Empty WorkspaceEdit is not explicitly forbidden
+  assert_that( lsc.WorkspaceEditToFixIt( request_data, {} ), equal_to( None ) )
+  # We don't support versioned documentChanges
+  workspace_edit = {
+    'documentChanges': [
+      {
+        'textDocument': {
+          'version': 1,
+          'uri': uri
+        },
+        'edits': [
+          {
+            'newText': 'blah',
+            'range': {
+              'start': { 'line': 0, 'character': 5 },
+              'end': { 'line': 0, 'character': 5 },
+            }
+          }
+        ]
+      }
+    ]
+  }
+  response = responses.BuildFixItResponse( [
+    lsc.WorkspaceEditToFixIt( request_data, workspace_edit, 'test' )
+  ] )
+
+  print( 'Response: {0}'.format( response ) )
+  assert_that(
+    response,
+    has_entries( {
+      'fixits': contains( has_entries( {
+        'text': 'test',
+        'chunks': contains( ChunkMatcher( 'blah',
+                                          LocationMatcher( filepath, 1, 6 ),
+                                          LocationMatcher( filepath, 1, 6 ) ) )
+      } ) )
+    } )
+  )
 
   workspace_edit = {
     'changes': {
@@ -633,7 +675,7 @@ def LanguageServerCompleter_GetCompletions_List_test():
     { 'result': { 'label': 'test' } },
   ]
 
-  with patch.object( completer, 'ServerIsReady', return_value = True ):
+  with patch.object( completer, '_is_completion_provider', True ):
     with patch.object( completer.GetConnection(),
                        'GetResponse',
                        side_effect = [ completion_response ] +
@@ -658,7 +700,7 @@ def LanguageServerCompleter_GetCompletions_UnsupportedKinds_test():
     { 'result': { 'label': 'test' } },
   ]
 
-  with patch.object( completer, 'ServerIsReady', return_value = True ):
+  with patch.object( completer, '_is_completion_provider', True ):
     with patch.object( completer.GetConnection(),
                        'GetResponse',
                        side_effect = [ completion_response ] +
@@ -671,6 +713,28 @@ def LanguageServerCompleter_GetCompletions_UnsupportedKinds_test():
           False
         )
       )
+
+
+def LanguageServerCompleter_GetCompletions_NullNoError_test():
+  completer = MockCompleter()
+  request_data = RequestWrap( BuildRequest() )
+  complete_response = { 'result': None }
+  resolve_responses = []
+  with patch.object( completer, '_ServerIsInitialized', return_value = True ):
+    with patch.object( completer,
+                       '_is_completion_provider',
+                       return_value = True ):
+      with patch.object( completer.GetConnection(),
+                         'GetResponse',
+                         side_effect = [ complete_response ] +
+                                       resolve_responses ):
+        assert_that(
+          completer.ComputeCandidatesInner( request_data, 1 ),
+          contains(
+            empty(),
+            False
+          )
+        )
 
 
 def LanguageServerCompleter_GetCompletions_CompleteOnStartColumn_test():
@@ -687,7 +751,7 @@ def LanguageServerCompleter_GetCompletions_CompleteOnStartColumn_test():
     }
   }
 
-  with patch.object( completer, 'ServerIsReady', return_value = True ):
+  with patch.object( completer, '_is_completion_provider', True ):
     request_data = RequestWrap( BuildRequest(
       column_num = 2,
       contents = 'a',
@@ -772,7 +836,7 @@ def LanguageServerCompleter_GetCompletions_CompleteOnCurrentColumn_test():
     }
   }
 
-  with patch.object( completer, 'ServerIsReady', return_value = True ):
+  with patch.object( completer, '_is_completion_provider', True ):
     # User starts by typing the character "a".
     request_data = RequestWrap( BuildRequest(
       column_num = 2,
@@ -947,7 +1011,7 @@ def LanguageServerCompleter_GetCodeActions_CursorOnEmptyLine_test():
 
   fixit_response = { 'result': [] }
 
-  with patch.object( completer, 'ServerIsReady', return_value = True ):
+  with patch.object( completer, '_ServerIsInitialized', return_value = True ):
     with patch.object( completer.GetConnection(),
                        'GetResponse',
                        side_effect = [ fixit_response ] ):
@@ -997,14 +1061,14 @@ def LanguageServerCompleter_Diagnostics_MaxDiagnosticsNumberExceeded_test():
           'end': { 'line': 4, 'character': 13 }
         },
         'severity': 1,
-        'message': 'Second error'
+        'message': 'Second error [8]'
       } ]
     }
   }
   completer.GetConnection()._notifications.put( notification )
   completer.HandleNotificationInPollThread( notification )
 
-  with patch.object( completer, 'ServerIsReady', return_value = True ):
+  with patch.object( completer, '_ServerIsInitialized', return_value = True ):
     completer.OnFileReadyToParse( request_data )
     # Simulate receipt of response and initialization complete
     initialize_response = {
@@ -1078,7 +1142,7 @@ def LanguageServerCompleter_Diagnostics_NoLimitToNumberOfDiagnostics_test():
   completer.GetConnection()._notifications.put( notification )
   completer.HandleNotificationInPollThread( notification )
 
-  with patch.object( completer, 'ServerIsReady', return_value = True ):
+  with patch.object( completer, '_ServerIsInitialized', return_value = True ):
     completer.OnFileReadyToParse( request_data )
     # Simulate receipt of response and initialization complete
     initialize_response = {
@@ -1125,18 +1189,112 @@ def LanguageServerCompleter_GetHoverResponse_test():
                                             column_num = 1,
                                             contents = '' ) )
 
-  with patch.object( completer, 'ServerIsReady', return_value = True ):
+  with patch.object( completer, '_ServerIsInitialized', return_value = True ):
     with patch.object( completer.GetConnection(),
                        'GetResponse',
                        side_effect = [ { 'result': None } ] ):
       assert_that(
         calling( completer.GetHoverResponse ).with_args( request_data ),
-        raises( RuntimeError, NO_HOVER_INFORMATION )
+        raises( NoHoverInfoException, NO_HOVER_INFORMATION )
       )
     with patch.object( completer.GetConnection(),
                        'GetResponse',
                        side_effect = [ { 'result': { 'contents': 'test' } } ] ):
       eq_( completer.GetHoverResponse( request_data ), 'test' )
+
+
+def LanguageServerCompleter_Diagnostics_Code_test():
+  completer = MockCompleter()
+  filepath = os.path.realpath( '/foo.cpp' )
+  uri = lsp.FilePathToUri( filepath )
+  request_data = RequestWrap( BuildRequest( line_num = 1,
+                                            column_num = 1,
+                                            filepath = filepath,
+                                            contents = '' ) )
+  notification = {
+    'jsonrpc': '2.0',
+    'method': 'textDocument/publishDiagnostics',
+    'params': {
+      'uri': uri,
+      'diagnostics': [ {
+        'range': {
+          'start': { 'line': 3, 'character': 10 },
+          'end': { 'line': 3, 'character': 11 }
+        },
+        'severity': 1,
+        'message': 'First error',
+        'code': 'random_error'
+      }, {
+        'range': {
+          'start': { 'line': 3, 'character': 10 },
+          'end': { 'line': 3, 'character': 11 }
+        },
+        'severity': 1,
+        'message': 'Second error',
+        'code': 8
+      }, {
+        'range': {
+          'start': { 'line': 3, 'character': 10 },
+          'end': { 'line': 3, 'character': 11 }
+        },
+        'severity': 1,
+        'message': 'Third error',
+        'code': '8'
+      } ]
+    }
+  }
+  completer.GetConnection()._notifications.put( notification )
+  completer.HandleNotificationInPollThread( notification )
+
+  with patch.object( completer, 'ServerIsReady', return_value = True ):
+    completer.OnFileReadyToParse( request_data )
+    # Simulate receipt of response and initialization complete
+    initialize_response = {
+      'result': {
+        'capabilities': {}
+      }
+    }
+    completer._HandleInitializeInPollThread( initialize_response )
+
+    diagnostics = contains(
+      has_entries( {
+        'kind': equal_to( 'ERROR' ),
+        'location': LocationMatcher( filepath, 4, 11 ),
+        'location_extent': RangeMatcher( filepath, ( 4, 11 ), ( 4, 12 ) ),
+        'ranges': contains(
+           RangeMatcher( filepath, ( 4, 11 ), ( 4, 12 ) ) ),
+        'text': equal_to( 'First error [random_error]' ),
+        'fixit_available': False
+      } ),
+      has_entries( {
+        'kind': equal_to( 'ERROR' ),
+        'location': LocationMatcher( filepath, 4, 11 ),
+        'location_extent': RangeMatcher( filepath, ( 4, 11 ), ( 4, 12 ) ),
+        'ranges': contains(
+           RangeMatcher( filepath, ( 4, 11 ), ( 4, 12 ) ) ),
+        'text': equal_to( 'Second error [8]' ),
+        'fixit_available': False
+      } ),
+      has_entries( {
+        'kind': equal_to( 'ERROR' ),
+        'location': LocationMatcher( filepath, 4, 11 ),
+        'location_extent': RangeMatcher( filepath, ( 4, 11 ), ( 4, 12 ) ),
+        'ranges': contains(
+           RangeMatcher( filepath, ( 4, 11 ), ( 4, 12 ) ) ),
+        'text': equal_to( 'Third error [8]' ),
+        'fixit_available': False
+      } )
+    )
+
+    assert_that( completer.OnFileReadyToParse( request_data ), diagnostics )
+
+    assert_that(
+      completer.PollForMessages( request_data ),
+      contains( has_entries( {
+        'diagnostics': diagnostics,
+        'filepath': filepath
+      } ) )
+    )
 
 
 def LanguageServerCompleter_Diagnostics_PercentEncodeCannonical_test():
@@ -1166,7 +1324,7 @@ def LanguageServerCompleter_Diagnostics_PercentEncodeCannonical_test():
   completer.GetConnection()._notifications.put( notification )
   completer.HandleNotificationInPollThread( notification )
 
-  with patch.object( completer, 'ServerIsReady', return_value = True ):
+  with patch.object( completer, '_ServerIsInitialized', return_value = True ):
     completer.OnFileReadyToParse( request_data )
     # Simulate receipt of response and initialization complete
     initialize_response = {
@@ -1225,7 +1383,7 @@ def LanguageServerCompleter_OnFileReadyToParse_InvalidURI_test():
   completer.GetConnection()._notifications.put( notification )
   completer.HandleNotificationInPollThread( notification )
 
-  with patch.object( completer, 'ServerIsReady', return_value = True ):
+  with patch.object( completer, '_ServerIsInitialized', return_value = True ):
     completer.OnFileReadyToParse( request_data )
     # Simulate receipt of response and initialization complete
     initialize_response = {
@@ -1252,3 +1410,34 @@ def LanguageServerCompleter_OnFileReadyToParse_InvalidURI_test():
                     uri_to_filepath:
       assert_that( completer.OnFileReadyToParse( request_data ), diagnostics )
       uri_to_filepath.assert_called()
+
+
+def _TupleToLSPRange( tuple ):
+  return { 'line': tuple[ 0 ], 'character': tuple[ 1 ] }
+
+
+def _Check_Distance( point, start, end, expected ):
+  point = _TupleToLSPRange( point )
+  start = _TupleToLSPRange( start )
+  end = _TupleToLSPRange( end )
+  range = { 'start': start, 'end': end }
+  result = lsc._DistanceOfPointToRange( point, range )
+  eq_( result, expected )
+
+
+def LanguageServerCompleter_DistanceOfPointToRange_SingleLineRange_test():
+  # Point to the left of range.
+  _Check_Distance( ( 0, 0 ), ( 0, 2 ), ( 0, 5 ) , 2 )
+  # Point inside range.
+  _Check_Distance( ( 0, 4 ), ( 0, 2 ), ( 0, 5 ) , 0 )
+  # Point to the right of range.
+  _Check_Distance( ( 0, 8 ), ( 0, 2 ), ( 0, 5 ) , 3 )
+
+
+def LanguageServerCompleter_DistanceOfPointToRange_MultiLineRange_test():
+  # Point to the left of range.
+  _Check_Distance( ( 0, 0 ), ( 0, 2 ), ( 3, 5 ) , 2 )
+  # Point inside range.
+  _Check_Distance( ( 1, 4 ), ( 0, 2 ), ( 3, 5 ) , 0 )
+  # Point to the right of range.
+  _Check_Distance( ( 3, 8 ), ( 0, 2 ), ( 3, 5 ) , 3 )

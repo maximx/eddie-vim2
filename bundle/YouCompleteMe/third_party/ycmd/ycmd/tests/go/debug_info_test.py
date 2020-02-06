@@ -22,9 +22,17 @@ from __future__ import absolute_import
 # Not installing aliases from python-future; it's unreliable and slow.
 from builtins import *  # noqa
 
-from hamcrest import assert_that, contains, has_entries, has_entry, instance_of
+from hamcrest import ( assert_that,
+                       contains,
+                       has_entries,
+                       has_entry,
+                       instance_of,
+                       matches_regexp )
 
-from ycmd.tests.go import SharedYcmd
+from ycmd.tests.go import ( IsolatedYcmd,
+                            PathToTestFile,
+                            SharedYcmd,
+                            StartGoCompleterServerInDirectory )
 from ycmd.tests.test_utils import BuildRequest
 
 
@@ -36,18 +44,70 @@ def DebugInfo_test( app ):
     has_entry( 'completer', has_entries( {
       'name': 'Go',
       'servers': contains( has_entries( {
-        'name': 'Gocode',
+        'name': 'gopls',
         'is_running': instance_of( bool ),
-        'executable': instance_of( str ),
+        'executable': contains( instance_of( str ),
+                                instance_of( str ),
+                                instance_of( str ),
+                                instance_of( str ) ),
+        'address': None,
+        'port': None,
         'pid': instance_of( int ),
-        'address': instance_of( str ),
-        'port': instance_of( int ),
-        'logfiles': contains( instance_of( str ),
-                              instance_of( str ) )
+        'logfiles': contains( instance_of( str ) ),
+        'extras': contains(
+          has_entries( {
+            'key': 'Server State',
+            'value': instance_of( str ),
+          } ),
+          has_entries( {
+            'key': 'Project Directory',
+            'value': PathToTestFile(),
+          } ),
+          has_entries( {
+            'key': 'Settings',
+            'value': matches_regexp( '{\n  "fuzzyMatching": false,\\s?\n'
+                                     '  "hoverKind": "Structured"\n}' )
+          } ),
+        )
       } ) ),
-      'items': contains( has_entries( {
-        'key': 'Godef executable',
-        'value': instance_of( str )
-      } ) )
+    } ) )
+  )
+
+
+@IsolatedYcmd
+def DebugInfo_ProjectDirectory_test( app ):
+  project_dir = PathToTestFile( 'td' )
+  StartGoCompleterServerInDirectory( app, project_dir )
+  assert_that(
+    app.post_json( '/debug_info', BuildRequest( filetype = 'go' ) ).json,
+    has_entry( 'completer', has_entries( {
+      'name': 'Go',
+      'servers': contains( has_entries( {
+        'name': 'gopls',
+        'is_running': instance_of( bool ),
+        'executable': contains( instance_of( str ),
+                                instance_of( str ),
+                                instance_of( str ),
+                                instance_of( str ) ),
+        'address': None,
+        'port': None,
+        'pid': instance_of( int ),
+        'logfiles': contains( instance_of( str ) ),
+        'extras': contains(
+          has_entries( {
+            'key': 'Server State',
+            'value': instance_of( str ),
+          } ),
+          has_entries( {
+            'key': 'Project Directory',
+            'value': PathToTestFile(),
+          } ),
+          has_entries( {
+            'key': 'Settings',
+            'value': matches_regexp( '{\n  "fuzzyMatching": false,\\s?\n'
+                                     '  "hoverKind": "Structured"\n}' )
+          } ),
+        )
+      } ) ),
     } ) )
   )

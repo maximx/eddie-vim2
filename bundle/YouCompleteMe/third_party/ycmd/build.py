@@ -7,7 +7,6 @@ from __future__ import print_function
 from __future__ import division
 from __future__ import absolute_import
 
-from shutil import rmtree
 from tempfile import mkdtemp
 import argparse
 import errno
@@ -23,12 +22,13 @@ import subprocess
 import sys
 import sysconfig
 import tarfile
+from zipfile import ZipFile
 import tempfile
 
 IS_64BIT = sys.maxsize > 2**32
 PY_MAJOR, PY_MINOR = sys.version_info[ 0 : 2 ]
-version = sys.version_info[ 0 : 3 ]
-if version < ( 2, 7, 1 ) or ( 3, 0, 0 ) <= version < ( 3, 5, 1 ):
+PY_VERSION = sys.version_info[ 0 : 3 ]
+if PY_VERSION < ( 2, 7, 1 ) or ( 3, 0, 0 ) <= PY_VERSION < ( 3, 5, 1 ):
   sys.exit( 'ycmd requires Python >= 2.7.1 or >= 3.5.1; '
             'your version of Python is ' + sys.version )
 
@@ -87,13 +87,16 @@ DYNAMIC_PYTHON_LIBRARY_REGEX = """
   )$
 """
 
-JDTLS_MILESTONE = '0.26.0'
-JDTLS_BUILD_STAMP = '201810021912'
+JDTLS_MILESTONE = '0.45.0'
+JDTLS_BUILD_STAMP = '201910031256'
 JDTLS_SHA256 = (
-  '37c02deb37335668321643571e7316a231d94d07707325afdb83b16c953f2244'
+  '06c499bf151d78027c2480bcbcca313f70ae0e8e07fc07cea6319359aea848f4'
 )
 
-TSSERVER_VERSION = '3.3.3333'
+TSSERVER_VERSION = '3.7.2'
+
+RUST_TOOLCHAIN = 'nightly-2019-09-05'
+RLS_DIR = p.join( DIR_OF_THIRD_PARTY, 'rls' )
 
 BUILD_ERROR_MESSAGE = (
   'ERROR: the build failed.\n\n'
@@ -104,7 +107,7 @@ BUILD_ERROR_MESSAGE = (
   'issue tracker, including the entire output of this script\n'
   'and the invocation line used to run it.' )
 
-CLANGD_VERSION = '8.0.0'
+CLANGD_VERSION = '9.0.0'
 CLANGD_BINARIES_ERROR_MESSAGE = (
   'No prebuilt Clang {version} binaries for {platform}. '
   'You\'ll have to compile Clangd {version} from source '
@@ -112,9 +115,23 @@ CLANGD_BINARIES_ERROR_MESSAGE = (
   'See the YCM docs for details on how to use a custom Clangd.' )
 
 
+def RemoveDirectory( directory ):
+  try_number = 0
+  max_tries = 10
+  while try_number < max_tries:
+    try:
+      shutil.rmtree( directory )
+      return
+    except OSError:
+      try_number += 1
+  raise RuntimeError(
+    'Cannot remove directory {} after {} tries.'.format( directory,
+                                                         max_tries ) )
+
+
 def MakeCleanDirectory( directory_path ):
   if p.exists( directory_path ):
-    shutil.rmtree( directory_path )
+    RemoveDirectory( directory_path )
   os.makedirs( directory_path )
 
 
@@ -155,15 +172,11 @@ def OnX86_64():
   return platform.machine().lower().startswith( 'x86_64' )
 
 
-def OnCiService():
-  return 'CI' in os.environ
-
-
 def FindExecutableOrDie( executable, message ):
   path = FindExecutable( executable )
 
   if not path:
-    sys.exit( "ERROR: Unable to find executable '{0}'. {1}".format(
+    sys.exit( "ERROR: Unable to find executable '{}'. {}".format(
       executable,
       message ) )
 
@@ -226,17 +239,16 @@ def CheckCall( args, **kwargs ):
 
 
 def _CheckCallQuiet( args, status_message, **kwargs ):
-  if not status_message:
-    status_message = 'Running {}'.format( args[ 0 ] )
-
-  # __future__ not appear to support flush= on print_function
-  sys.stdout.write( status_message + '...' )
-  sys.stdout.flush()
+  if status_message:
+    # __future__ not appear to support flush= on print_function
+    sys.stdout.write( status_message + '...' )
+    sys.stdout.flush()
 
   with tempfile.NamedTemporaryFile() as temp_file:
     _CheckCall( args, stdout=temp_file, stderr=subprocess.STDOUT, **kwargs )
 
-  print( "OK" )
+  if status_message:
+    print( "OK" )
 
 
 def _CheckCall( args, **kwargs ):
@@ -360,6 +372,10 @@ def GetGenerator( args ):
   if args.ninja:
     return 'Ninja'
   if OnWindows():
+    # The architecture must be specified through the -A option for the Visual
+    # Studio 16 generator.
+    if args.msvc == 16:
+      return 'Visual Studio 16'
     return 'Visual Studio {version}{arch}'.format(
         version = args.msvc, arch = ' Win64' if IS_64BIT else '' )
   return 'Unix Makefiles'
@@ -390,8 +406,8 @@ def ParseArguments():
   parser.add_argument( '--system-libclang', action = 'store_true',
                        help = 'Use system libclang instead of downloading one '
                        'from llvm.org. NOT RECOMMENDED OR SUPPORTED!' )
-  parser.add_argument( '--msvc', type = int, choices = [ 14, 15 ],
-                       default = 15, help = 'Choose the Microsoft Visual '
+  parser.add_argument( '--msvc', type = int, choices = [ 14, 15, 16 ],
+                       default = 16, help = 'Choose the Microsoft Visual '
                        'Studio version (default: %(default)s).' )
   parser.add_argument( '--ninja', action = 'store_true',
                        help = 'Use Ninja build system.' )
@@ -424,9 +440,14 @@ def ParseArguments():
                        help = "Don't build the regex module" )
   parser.add_argument( '--clang-tidy',
                        action = 'store_true',
-                       help = 'Run clang-tidy static analysis' )
+                       help = 'For developers: Run clang-tidy static analysis '
+                              'on the ycm_core code itself.' )
   parser.add_argument( '--core-tests', nargs = '?', const = '*',
                        help = 'Run core tests and optionally filter them.' )
+  parser.add_argument( '--cmake-path',
+                       help = 'For developers: specify the cmake executable. '
+                              'Useful for testing with specific versions, or '
+                              'if the system is unable to find cmake.' )
 
   # These options are deprecated.
   parser.add_argument( '--omnisharp-completer', action = 'store_true',
@@ -463,13 +484,25 @@ def ParseArguments():
   return args
 
 
-def FindCmake():
-  return FindExecutableOrDie( 'cmake', 'CMake is required to build ycmd' )
+def FindCmake( args ):
+  cmake_exe = 'cmake'
+
+  if args.cmake_path:
+    cmake_exe = args.cmake_path
+
+  return FindExecutableOrDie( cmake_exe, 'CMake is required to build ycmd' )
 
 
 def GetCmakeCommonArgs( args ):
   cmake_args = [ '-G', GetGenerator( args ) ]
+
+  # Set the architecture for the Visual Studio 16 generator.
+  if OnWindows() and args.msvc == 16:
+    arch = 'x64' if IS_64BIT else 'Win32'
+    cmake_args.extend( [ '-A', arch ] )
+
   cmake_args.extend( CustomPythonCmakeArgs( args ) )
+
   return cmake_args
 
 
@@ -621,7 +654,7 @@ def BuildYcmdLib( cmake, cmake_common_args, script_args ):
     if script_args.build_dir:
       print( 'The build files are in: ' + build_dir )
     else:
-      rmtree( build_dir, ignore_errors = OnCiService() )
+      RemoveDirectory( build_dir )
 
 
 def BuildRegexModule( cmake, cmake_common_args, script_args ):
@@ -649,57 +682,252 @@ def BuildRegexModule( cmake, cmake_common_args, script_args ):
                status_message = 'Compiling regex module' )
   finally:
     os.chdir( DIR_OF_THIS_SCRIPT )
-    rmtree( build_dir, ignore_errors = OnCiService() )
+    RemoveDirectory( build_dir )
 
 
 def EnableCsCompleter( args ):
-  build_command = PathToFirstExistingExecutable(
-    [ 'msbuild', 'msbuild.exe', 'xbuild' ] )
-  if not build_command:
-    sys.exit( 'ERROR: msbuild or xbuild is required to build Omnisharp.' )
+  def WriteStdout( text ):
+    if not args.quiet:
+      sys.stdout.write( text )
+      sys.stdout.flush()
 
-  os.chdir( p.join( DIR_OF_THIS_SCRIPT, 'third_party', 'OmniSharpServer' ) )
-  CheckCall( [ build_command, '/property:Configuration=Release',
-                              '/property:Platform=Any CPU',
-                              '/property:TargetFrameworkVersion=v4.5' ],
-             quiet = args.quiet,
-             status_message = 'Building OmniSharp for C# completion' )
+  if args.quiet:
+    sys.stdout.write( 'Installing Omnisharp for C# support...' )
+    sys.stdout.flush()
+
+  build_dir = p.join( DIR_OF_THIRD_PARTY, "omnisharp-roslyn" )
+  try:
+    MkDirIfMissing( build_dir )
+    os.chdir( build_dir )
+
+    download_data = GetCsCompleterDataForPlatform()
+    version = download_data[ 'version' ]
+
+    WriteStdout( "Installing Omnisharp {}\n".format( version ) )
+
+    CleanCsCompleter( build_dir, version )
+    package_path = DownloadCsCompleter( WriteStdout, download_data )
+    ExtractCsCompleter( WriteStdout, build_dir, package_path )
+
+    WriteStdout( "Done installing Omnisharp\n" )
+
+    if args.quiet:
+      print( 'OK' )
+  finally:
+    os.chdir( DIR_OF_THIS_SCRIPT )
+
+
+def MkDirIfMissing( path ):
+  try:
+    os.mkdir( path )
+  except OSError:
+    pass
+
+
+def CleanCsCompleter( build_dir, version ):
+  for file_name in os.listdir( build_dir ):
+    file_path = os.path.join( build_dir, file_name )
+    if file_name == version:
+      continue
+    if os.path.isfile( file_path ):
+      os.remove( file_path )
+    elif os.path.isdir( file_path ):
+      import shutil
+      shutil.rmtree( file_path )
+
+
+def DownloadCsCompleter( writeStdout, download_data ):
+  file_name = download_data[ 'file_name' ]
+  download_url = download_data[ 'download_url' ]
+  check_sum = download_data[ 'check_sum' ]
+  version = download_data[ 'version' ]
+
+  MkDirIfMissing( version )
+
+  package_path = p.join( version, file_name )
+  if ( p.exists( package_path )
+       and not CheckFileIntegrity( package_path, check_sum ) ):
+    writeStdout( 'Cached Omnisharp file does not match checksum.\n' )
+    writeStdout( 'Removing...' )
+    os.remove( package_path )
+    writeStdout( 'DONE\n' )
+
+  if p.exists( package_path ):
+    writeStdout( 'Using cached Omnisharp: {}\n'.format( file_name ) )
+  else:
+    writeStdout( 'Downloading Omnisharp from {}...'.format(
+                    download_url ) )
+    DownloadFileTo( download_url, package_path )
+    writeStdout( 'DONE\n' )
+
+  return package_path
+
+
+def ExtractCsCompleter( writeStdout, build_dir, package_path ):
+  writeStdout( 'Extracting Omnisharp to {}...'.format( build_dir ) )
+  if OnWindows():
+    with ZipFile( package_path, 'r' ) as package_zip:
+      package_zip.extractall()
+  else:
+    with tarfile.open( package_path ) as package_tar:
+      package_tar.extractall()
+  writeStdout( 'DONE\n' )
+
+
+def GetCsCompleterDataForPlatform():
+  ####################################
+  # GENERATED BY update_omnisharp.py #
+  # DON'T MANUALLY EDIT              #
+  ####################################
+  DATA = {
+    'win32': {
+      'file_name': 'omnisharp.http-win-x86.zip',
+      'version': 'v1.34.2',
+      'download_url': ( 'https://github.com/OmniSharp/omnisharp-roslyn/relea'
+                        'ses/download/v1.34.2/omnisharp.http-win-x86.zip' ),
+      'check_sum': ( 'd66ee6ce347bba58de06a585bff63e8f42178c8b212883be0700919'
+                     '61c3c63d6' ),
+    },
+    'win64': {
+      'file_name': 'omnisharp.http-win-x64.zip',
+      'version': 'v1.34.2',
+      'download_url': ( 'https://github.com/OmniSharp/omnisharp-roslyn/relea'
+                        'ses/download/v1.34.2/omnisharp.http-win-x64.zip' ),
+      'check_sum': ( 'ab6bdac04b7225a69de11a0bdf0777facbe7d9895e9b6b4c8ebe8b5'
+                     '4b51412e5' ),
+    },
+    'macos': {
+      'file_name': 'omnisharp.http-osx.tar.gz',
+      'version': 'v1.34.2',
+      'download_url': ( 'https://github.com/OmniSharp/omnisharp-roslyn/relea'
+                        'ses/download/v1.34.2/omnisharp.http-osx.tar.gz' ),
+      'check_sum': ( 'bea5e6e35a45bcece293ad2a32b717be16242d5ee6ca0004ca1c7af'
+                     'c9cacdbf7' ),
+    },
+    'linux64': {
+      'file_name': 'omnisharp.http-linux-x64.tar.gz',
+      'version': 'v1.34.2',
+      'download_url': ( 'https://github.com/OmniSharp/omnisharp-roslyn/relea'
+                        'ses/download/v1.34.2/omnisharp.http-linux-x64.tar.g'
+                        'z' ),
+      'check_sum': ( '16aa6f3d97c11829b3fc177cea5c221ddb952a5d372fe84e735f695'
+                     '50d661722' ),
+    },
+    'linux32': {
+      'file_name': 'omnisharp.http-linux-x86.tar.gz',
+      'version': 'v1.34.2',
+      'download_url': ( 'https://github.com/OmniSharp/omnisharp-roslyn/relea'
+                        'ses/download/v1.34.2/omnisharp.http-linux-x86.tar.g'
+                        'z' ),
+      'check_sum': ( '6f89480ce95286640f670943f5d8e0d1f1c28db6bab07461be3f452'
+                     'e8b43c70b' ),
+    },
+  }
+  if OnWindows():
+    return DATA[ 'win64' if IS_64BIT else 'win32' ]
+  else:
+    if OnMac():
+      return DATA[ 'macos' ]
+    return DATA[ 'linux64' if IS_64BIT else 'linux32' ]
 
 
 def EnableGoCompleter( args ):
   go = FindExecutableOrDie( 'go', 'go is required to build gocode.' )
 
   go_dir = p.join( DIR_OF_THIS_SCRIPT, 'third_party', 'go' )
-  os.chdir( p.join( go_dir, 'src', 'github.com', 'mdempsky', 'gocode' ) )
-  new_env = os.environ.copy()
-  new_env[ 'GOPATH' ] = go_dir
+  os.chdir( p.join(
+    go_dir, 'src', 'golang.org', 'x', 'tools', 'cmd', 'gopls' ) )
   CheckCall( [ go, 'build' ],
-             env = new_env,
              quiet = args.quiet,
-             status_message = 'Building gocode for go completion' )
-  os.chdir( p.join( go_dir, 'src', 'github.com', 'rogpeppe', 'godef' ) )
-  CheckCall( [ go, 'build' ],
-             env = new_env,
-             quiet = args.quiet,
-             status_message = 'Building godef for go definition' )
+             status_message = 'Building gopls for go completion' )
 
 
-def EnableRustCompleter( args ):
-  """
-  Build racerd. This requires a reasonably new version of rustc/cargo.
-  """
-  cargo = FindExecutableOrDie( 'cargo',
-                               'cargo is required for the Rust completer.' )
+def WriteToolchainVersion( version ):
+  path = p.join( RLS_DIR, 'TOOLCHAIN_VERSION' )
+  with open( path, 'w' ) as f:
+    f.write( version )
 
-  os.chdir( p.join( DIR_OF_THIRD_PARTY, 'racerd' ) )
-  command_line = [ cargo, 'build' ]
-  # We don't use the --release flag on CI services because it makes building
-  # racerd 2.5x slower and we don't care about the speed of the produced racerd.
-  if not OnCiService():
-    command_line.append( '--release' )
-  CheckCall( command_line,
-             quiet = args.quiet,
-             status_message = 'Building racerd for Rust completion' )
+
+def ReadToolchainVersion():
+  try:
+    filepath = p.join( RLS_DIR, 'TOOLCHAIN_VERSION' )
+    with open( filepath ) as f:
+      return f.read().strip()
+  # We need to check for IOError for Python 2 and OSError for Python 3.
+  except ( IOError, OSError ):
+    return None
+
+
+def EnableRustCompleter( switches ):
+  if switches.quiet:
+    sys.stdout.write( 'Installing RLS for Rust support...' )
+    sys.stdout.flush()
+
+  toolchain_version = ReadToolchainVersion()
+  if toolchain_version != RUST_TOOLCHAIN:
+    install_dir = mkdtemp( prefix = 'rust_install_' )
+
+    new_env = os.environ.copy()
+    new_env[ 'RUSTUP_HOME' ] = install_dir
+
+    # Python versions older than 2.7.9 lack SNI support which is required to
+    # download rustup from the official website.
+    if PY_VERSION < ( 2, 7, 9 ):
+      rustup = FindExecutableOrDie( 'rustup',
+                                    'rustup is required to install RLS '
+                                    'on Python < 2.7.9.' )
+    else:
+      rustup_init = os.path.join( install_dir, 'rustup-init' )
+
+      if OnWindows():
+        rustup_cmd = [ rustup_init ]
+        rustup_url = 'https://win.rustup.rs/{}'.format(
+          'x86_64' if IS_64BIT else 'i686' )
+      else:
+        rustup_cmd = [ 'sh', rustup_init ]
+        rustup_url = 'https://sh.rustup.rs'
+
+      DownloadFileTo( rustup_url, rustup_init )
+
+      new_env[ 'CARGO_HOME' ] = install_dir
+
+      CheckCall( rustup_cmd + [ '-y',
+                                '--default-toolchain', 'none',
+                                '--no-modify-path' ],
+                 env = new_env,
+                 quiet = switches.quiet )
+
+      rustup = os.path.join( install_dir, 'bin', 'rustup' )
+
+    try:
+      CheckCall( [ rustup, 'toolchain', 'install', RUST_TOOLCHAIN ],
+                 env = new_env,
+                 quiet = switches.quiet )
+
+      for component in [ 'rls', 'rust-analysis', 'rust-src' ]:
+        CheckCall( [ rustup, 'component', 'add', component,
+                     '--toolchain', RUST_TOOLCHAIN ],
+                   env = new_env,
+                   quiet = switches.quiet )
+
+      toolchain_dir = subprocess.check_output(
+        [ rustup, 'run', RUST_TOOLCHAIN, 'rustc', '--print', 'sysroot' ],
+        env = new_env
+      ).rstrip().decode( 'utf8' )
+
+      if p.exists( RLS_DIR ):
+        RemoveDirectory( RLS_DIR )
+      os.makedirs( RLS_DIR )
+
+      for folder in os.listdir( toolchain_dir ):
+        shutil.move( p.join( toolchain_dir, folder ), RLS_DIR )
+
+      WriteToolchainVersion( RUST_TOOLCHAIN )
+    finally:
+      RemoveDirectory( install_dir )
+
+  if switches.quiet:
+    print( 'OK' )
 
 
 def EnableJavaScriptCompleter( args ):
@@ -742,8 +970,8 @@ def EnableJavaCompleter( switches ):
   REPOSITORY = p.join( TARGET, 'repository' )
   CACHE = p.join( TARGET, 'cache' )
 
-  JDTLS_SERVER_URL_FORMAT = ( 'http://download.eclipse.org/jdtls/milestones/'
-                              '{jdtls_milestone}/{jdtls_package_name}' )
+  JDTLS_SERVER_URL_FORMAT = ( 'http://download.eclipse.org/jdtls/snapshots/'
+                              '{jdtls_package_name}' )
   JDTLS_PACKAGE_NAME_FORMAT = ( 'jdt-language-server-{jdtls_milestone}-'
                                 '{jdtls_build_stamp}.tar.gz' )
 
@@ -795,31 +1023,31 @@ def GetClangdTarget():
   if OnWindows():
     return [
       ( 'clangd-{version}-win64',
-        'fddbef35131212feda9bf2aa4a779c635abbace09763ab709dca236ea177611d' ),
+        'e9dce7ae8984cdb719747780323c2cdd2152f41b3aa773510b37ad8de6788edf' ),
       ( 'clangd-{version}-win32',
-        '1ae8ad2e40ef2bc7798f8201ff5b071adab27a708f869568b9aabf5f9e5f02ad' ) ]
+        '48b33eeab7e20c5388bd29503be6486260449cc0fbf631999e14c4d98b97b7c6' ) ]
   if OnMac():
     return [
       ( 'clangd-{version}-x86_64-apple-darwin',
-        'c0e8017b445db2fbd2d0b42c47ea2f711a8774320894585bc0fa2d2e0c04059f' ) ]
+        'c89609cd7dcdf60df62e0d28841266ebe7514b2b68739bd6f0399bf74928a165' ) ]
   if OnFreeBSD():
     return [
       ( 'clangd-{version}-amd64-unknown-freebsd11',
-        'b31c93c280a7f543536715a4706ba3dda2583cd96cf2c34a6b84648773cabbf5' ),
+        'e1169eb2b432af0c31d812fa5d0f68e670c1a5efa3e51d00400d847800e6b257' ),
       ( 'clangd-{version}-i386-unknown-freebsd11',
-        'f48c9a5d2997d387a6473115e131d45a9ee764e6f149bed89d4f3ded336a7f00' ) ]
+        '34ded7733cd2bd23b6587d29d78dbf8192ef3134cf692f09263dd1b5e5a58f6f' ) ]
   if OnAArch64():
     return [
       ( 'clangd-{version}-aarch64-linux-gnu',
-        '32de29f3dc735a7e2557f936d8d81438be367e1e4771088c44c8824b07963d04' ) ]
+        'e593f7d036434db023c1c323756d6630bb4a2f868c45d682ba967846061f5fa9' ) ]
   if OnArm():
     return [
       ( 'clangd-{version}-armv7a-linux-gnueabihf',
-        '711b80610d477fd4c830a43725b644901c58e9c825f09233b9f9d7382b2c2882' ) ]
+        'ff1d8f20eddd7c9d659fb1e692fe961526ff1b858c0798781fad62f2f9e0522b' ) ]
   if OnX86_64():
     return [
       ( 'clangd-{version}-x86_64-unknown-linux-gnu',
-        '29b2af2775ec3b7e70a64197bf49fd876903732ff038bb5de2486d1194af7817' ) ]
+        '742ee805373b89e6b30711847af1fc391fe7f8ecb89cf8f8b9515f412571c0cb' ) ]
   sys.exit( CLANGD_BINARIES_ERROR_MESSAGE.format( version = CLANGD_VERSION,
                                                   platform = 'this system' ) )
 
@@ -833,7 +1061,7 @@ def DownloadClangd( printer ):
   target_name, check_sum = target[ not IS_64BIT ]
   target_name = target_name.format( version = CLANGD_VERSION )
   file_name = '{}.tar.bz2'.format( target_name )
-  download_url = 'https://dl.bintray.com/micbou/clangd/{}'.format( file_name )
+  download_url = 'https://dl.bintray.com/ycm-core/clangd/{}'.format( file_name )
 
   file_name = p.join( CLANGD_CACHE_DIR, file_name )
 
@@ -874,6 +1102,11 @@ def EnableClangdCompleter( Args ):
   if Args.quiet:
     print( 'OK' )
 
+  if not Args.quiet:
+    print( 'Clangd completer enabled. If you are using .ycm_extra_conf.py '
+           'files, make sure they use Settings() instead of the old and '
+           'deprecated FlagsForFile().' )
+
 
 def WritePythonUsedDuringBuild():
   path = p.join( DIR_OF_THIS_SCRIPT, 'PYTHON_USED_DURING_BUILDING' )
@@ -882,7 +1115,7 @@ def WritePythonUsedDuringBuild():
 
 
 def DoCmakeBuilds( args ):
-  cmake = FindCmake()
+  cmake = FindCmake( args )
   cmake_common_args = GetCmakeCommonArgs( args )
 
   if not args.skip_build:
@@ -911,7 +1144,7 @@ def Main():
     EnableJavaCompleter( args )
   if args.ts_completer or args.all_completers:
     EnableTypeScriptCompleter( args )
-  if args.clangd_completer:
+  if args.clangd_completer or args.all_completers:
     EnableClangdCompleter( args )
 
 

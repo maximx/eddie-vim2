@@ -27,20 +27,26 @@ from hamcrest import ( assert_that,
                        contains_string,
                        equal_to,
                        has_entries,
+                       has_entry,
                        matches_regexp )
+from mock import patch
 from pprint import pprint
 import requests
 import os.path
 
+from ycmd import handlers
 from ycmd.tests.clangd import ( IsolatedYcmd,
                                 SharedYcmd,
                                 PathToTestFile,
                                 RunAfterInitialized )
 from ycmd.tests.test_utils import ( BuildRequest,
                                     ChunkMatcher,
+                                    CombineRequest,
                                     LineColMatcher,
                                     LocationMatcher,
-                                    ErrorMatcher )
+                                    ErrorMatcher,
+                                    WithRetry,
+                                    WaitUntilCompleterServerReady )
 from ycmd.utils import ReadFile
 
 
@@ -59,8 +65,11 @@ def Subcommands_DefinedSubcommands_test( app ):
       },
       'expect': {
         'response': requests.codes.ok,
-        'data': contains( *sorted( [ 'FixIt',
+        'data': contains( *sorted( [ 'ExecuteCommand',
+                                     'FixIt',
                                      'Format',
+                                     'GetDoc',
+                                     'GetDocImprecise',
                                      'GetType',
                                      'GetTypeImprecise',
                                      'GoTo',
@@ -74,6 +83,47 @@ def Subcommands_DefinedSubcommands_test( app ):
       },
       'route': '/defined_subcommands',
   } )
+
+
+def Subcommands_ServerNotInitialized_test():
+
+  completer = handlers._server_state.GetFiletypeCompleter( [ 'cpp' ] )
+
+  @SharedYcmd
+  @patch.object( completer, '_ServerIsInitialized', return_value = False )
+  def Test( app, cmd, *args ):
+    request = {
+      'line_num': 1,
+      'column_num': 1,
+      'event_name': 'FileReadyToParse',
+      'filetype': 'cpp',
+      'command_arguments': [ cmd ]
+    }
+    app.post_json( '/event_notification',
+                   BuildRequest( **request ),
+                   expect_errors = True )
+    response = app.post_json(
+      '/run_completer_command',
+      BuildRequest( **request ),
+      expect_errors = True
+    )
+    assert_that( response.status_code, equal_to( requests.codes.server_error ) )
+    assert_that( response.json,
+                 ErrorMatcher( RuntimeError,
+                               'Server is initializing. Please wait.' ) )
+
+  yield Test, 'FixIt'
+  yield Test, 'Format'
+  yield Test, 'GetDoc'
+  yield Test, 'GetDocImprecise'
+  yield Test, 'GetType'
+  yield Test, 'GetTypeImprecise'
+  yield Test, 'GoTo'
+  yield Test, 'GoToDeclaration'
+  yield Test, 'GoToDefinition'
+  yield Test, 'GoToInclude'
+  yield Test, 'GoToReferences'
+  yield Test, 'RefactorRename'
 
 
 @SharedYcmd
@@ -161,15 +211,14 @@ def Subcommands_GoTo_all_test():
     { 'req': ( 'goto.cc', 24, 26 ), 'res': ( 'goto.cc', 6, 10 ) },
     # Local -> definition/declaration of Local
     { 'req': ( 'goto.cc', 24, 16 ), 'res': ( 'goto.cc', 2, 11 ) },
-    # Local::out_of_line -> declaration of Local::out_of_line
-    { 'req': ( 'goto.cc', 25, 27 ), 'res': [ ( 'goto.cc', 14, 13 ),
-                                             ( 'goto.cc', 11, 10 ) ] },
-    # GoToDeclaration on definition of out_of_line moves to declaration
-    { 'req': ( 'goto.cc', 14, 13 ), 'res': [ ( 'goto.cc', 14, 13 ),
-                                             ( 'goto.cc', 11, 10 ) ] },
+    # Local::out_of_line -> definition of Local::out_of_line
+    { 'req': ( 'goto.cc', 25, 27 ), 'res': ( 'goto.cc', 14, 13 ) },
+    # GoToDeclaration alternates between definition and declaration
+    { 'req': ( 'goto.cc', 14, 13 ), 'res': ( 'goto.cc', 11, 10 ) },
+    { 'req': ( 'goto.cc', 11, 10 ), 'res': ( 'goto.cc', 14, 13 ) },
     # test -> definition and declaration of test
-    { 'req': ( 'goto.cc', 21,  7 ), 'res': [ ( 'goto.cc', 21, 5 ),
-                                             ( 'goto.cc', 19, 5 ) ] },
+    { 'req': ( 'goto.cc', 21,  5 ), 'res': ( 'goto.cc', 19, 5 ) },
+    { 'req': ( 'goto.cc', 19,  5 ), 'res': ( 'goto.cc', 21, 5 ) },
     # Unicøde
     { 'req': ( 'goto.cc', 34,  9 ), 'res': ( 'goto.cc', 32, 26 ) },
     # Another_Unicøde
@@ -182,8 +231,39 @@ def Subcommands_GoTo_all_test():
   ]
 
   for test in tests:
-    for cmd in [ 'GoToDeclaration', 'GoToDefinition', 'GoTo', 'GoToImprecise' ]:
+    for cmd in [ 'GoToDefinition', 'GoTo', 'GoToImprecise' ]:
       yield RunGoToTest_all, '', cmd, test
+
+
+def Subcommands_GoToDeclaration_all_test():
+  tests = [
+    # Local::x -> definition/declaration of x
+    { 'req': ( 'goto.cc', 23, 21 ), 'res': ( 'goto.cc', 4, 9 ) },
+    # Local::in_line -> definition/declaration of Local::in_line
+    { 'req': ( 'goto.cc', 24, 26 ), 'res': ( 'goto.cc', 6, 10 ) },
+    # Local -> definition/declaration of Local
+    { 'req': ( 'goto.cc', 24, 16 ), 'res': ( 'goto.cc', 2, 11 ) },
+    # Local::out_of_line -> declaration of Local::out_of_line
+    { 'req': ( 'goto.cc', 25, 27 ), 'res': ( 'goto.cc', 11, 10 ) },
+    # GoToDeclaration alternates between definition and declaration
+    { 'req': ( 'goto.cc', 14, 13 ), 'res': ( 'goto.cc', 11, 10 ) },
+    { 'req': ( 'goto.cc', 11, 10 ), 'res': ( 'goto.cc', 14, 13 ) },
+    # test -> definition and declaration of test
+    { 'req': ( 'goto.cc', 21,  5 ), 'res': ( 'goto.cc', 19, 5 ) },
+    { 'req': ( 'goto.cc', 19,  5 ), 'res': ( 'goto.cc', 21, 5 ) },
+    # Unicøde
+    { 'req': ( 'goto.cc', 34,  9 ), 'res': ( 'goto.cc', 32, 26 ) },
+    # Another_Unicøde
+    { 'req': ( 'goto.cc', 36, 17 ), 'res': ( 'goto.cc', 32, 54 ) },
+    { 'req': ( 'goto.cc', 36, 25 ), 'res': ( 'goto.cc', 32, 54 ) },
+    { 'req': ( 'goto.cc', 38,  3 ), 'res': ( 'goto.cc', 36, 28 ) },
+    # Expected failures
+    { 'req': ( 'goto.cc', 13,  1 ), 'res': 'Cannot jump to location' },
+    { 'req': ( 'goto.cc', 16,  6 ), 'res': 'Cannot jump to location' },
+  ]
+
+  for test in tests:
+    yield RunGoToTest_all, '', 'GoToDeclaration', test
 
 
 def Subcommands_GoToInclude_test():
@@ -227,8 +307,12 @@ def Subcommands_GoToReferences_test():
 
 
 @SharedYcmd
-def RunGetSemanticTest( app, filepath, filetype, test, command,
-                        matches_regexp = False ):
+def RunGetSemanticTest( app,
+                        filepath,
+                        filetype,
+                        test,
+                        command,
+                        response = requests.codes.ok ):
   contents = ReadFile( filepath )
   common_args = {
     'completer_target' : 'filetype_default',
@@ -240,41 +324,44 @@ def RunGetSemanticTest( app, filepath, filetype, test, command,
     'filetype'         : filetype
   }
 
-  args = test[ 0 ]
-  expected = test[ 1 ]
-
   request = common_args
-  request.update( args )
-
-  test = { 'request': request, 'route': '/run_completer_command' }
-  response = RunAfterInitialized( app, test )[ 'message' ]
-
-  pprint( response )
-  if matches_regexp:
-    assert_that( response, expected )
-  else:
-    assert_that( response, contains_string( expected ) )
+  request.update( test[ 0 ] )
+  test = { 'request': request,
+           'route': '/run_completer_command',
+           'expect': { 'response': response,
+                       'data': test[ 1 ] } }
+  RunAfterInitialized( app, test )
 
 
 def Subcommands_GetType_test():
   tests = [
     # Basic pod types
-    [ { 'line_num': 24, 'column_num':  3 }, 'Foo' ],
-    # [ { 'line_num': 12, 'column_num':  2 }, 'Foo' ],
-    [ { 'line_num': 12, 'column_num':  8 }, 'Foo' ],
-    [ { 'line_num': 12, 'column_num':  9 }, 'Foo' ],
-    [ { 'line_num': 12, 'column_num': 10 }, 'Foo' ],
-    # [ { 'line_num': 13, 'column_num':  3 }, 'int' ],
-    [ { 'line_num': 13, 'column_num':  7 }, 'int' ],
+    [ { 'line_num': 24, 'column_num':  3 },
+      has_entry( 'message', contains_string( 'Foo' ) ),
+      requests.codes.ok ],
+    # [ { 'line_num': 12, 'column_num':  2 }, 'Foo',
+    [ { 'line_num': 12, 'column_num':  8 },
+      has_entry( 'message', contains_string( 'Foo' ) ),
+      requests.codes.ok ],
+    [ { 'line_num': 12, 'column_num':  9 },
+      has_entry( 'message', contains_string( 'Foo' ) ),
+      requests.codes.ok ],
+    [ { 'line_num': 12, 'column_num': 10 },
+      has_entry( 'message', contains_string( 'Foo' ) ),
+      requests.codes.ok ],
+    # [ { 'line_num': 13, 'column_num':  3 }, 'int',
+    [ { 'line_num': 13, 'column_num':  7 },
+      has_entry( 'message', contains_string( 'int' ) ),
+      requests.codes.ok ],
     # [ { 'line_num': 15, 'column_num':  7 }, 'char' ],
 
     # Function
     # [ { 'line_num': 22, 'column_num':  2 }, 'int main()' ],
-    [ { 'line_num': 22, 'column_num':  6 }, 'int main()' ],
+    [ { 'line_num': 22, 'column_num':  6 }, 'int main()', requests.codes.ok ],
 
     # Declared and canonical type
     # On Ns::
-    [ { 'line_num': 25, 'column_num':  3 }, 'namespace Ns' ],
+    [ { 'line_num': 25, 'column_num':  3 }, 'namespace Ns', requests.codes.ok ],
     # On Type (Type)
     # [ { 'line_num': 25, 'column_num':  8 },
     # 'Ns::Type => Ns::BasicType<char>' ],
@@ -285,34 +372,66 @@ def Subcommands_GetType_test():
     # 'Ns::Type => Ns::BasicType<char>' ],
 
     # Cursor on decl for refs & pointers
-    [ { 'line_num': 39, 'column_num':  3 }, 'Foo' ],
-    [ { 'line_num': 39, 'column_num': 11 }, 'Foo &' ],
-    [ { 'line_num': 39, 'column_num': 15 }, 'Foo' ],
-    [ { 'line_num': 40, 'column_num':  3 }, 'Foo' ],
-    [ { 'line_num': 40, 'column_num': 11 }, 'Foo *' ],
-    [ { 'line_num': 40, 'column_num': 18 }, 'Foo' ],
+    [ { 'line_num': 39, 'column_num':  3 },
+      has_entry( 'message', contains_string( 'Foo' ) ),
+      requests.codes.ok ],
+    [ { 'line_num': 39, 'column_num': 11 },
+      has_entry( 'message', contains_string( 'Foo &' ) ),
+      requests.codes.ok ],
+    [ { 'line_num': 39, 'column_num': 15 },
+      has_entry( 'message', contains_string( 'Foo' ) ),
+      requests.codes.ok ],
+    [ { 'line_num': 40, 'column_num':  3 },
+      has_entry( 'message', contains_string( 'Foo' ) ),
+      requests.codes.ok ],
+    [ { 'line_num': 40, 'column_num': 11 },
+      has_entry( 'message', contains_string( 'Foo *' ) ),
+      requests.codes.ok ],
+    [ { 'line_num': 40, 'column_num': 18 },
+      has_entry( 'message', contains_string( 'Foo' ) ),
+      requests.codes.ok ],
     # [ { 'line_num': 42, 'column_num':  3 }, 'const Foo &' ],
-    [ { 'line_num': 42, 'column_num': 16 }, 'const struct Foo &' ],
+    [ { 'line_num': 42, 'column_num': 16 },
+      has_entry( 'message', contains_string( 'const struct Foo &' ) ),
+      requests.codes.ok ],
     # [ { 'line_num': 43, 'column_num':  3 }, 'const Foo *' ],
-    [ { 'line_num': 43, 'column_num': 16 }, 'const struct Foo *' ],
+    [ { 'line_num': 43, 'column_num': 16 },
+      has_entry( 'message', contains_string( 'const struct Foo *' ) ),
+      requests.codes.ok ],
 
     # Cursor on usage
-    [ { 'line_num': 45, 'column_num': 13 }, 'const struct Foo' ],
+    [ { 'line_num': 45, 'column_num': 13 },
+      has_entry( 'message', contains_string( 'const struct Foo' ) ),
+      requests.codes.ok ],
     # [ { 'line_num': 45, 'column_num': 19 }, 'const int' ],
-    [ { 'line_num': 46, 'column_num': 13 }, 'const struct Foo *' ],
+    [ { 'line_num': 46, 'column_num': 13 },
+      has_entry( 'message', contains_string( 'const struct Foo *' ) ),
+      requests.codes.ok ],
     # [ { 'line_num': 46, 'column_num': 20 }, 'const int' ],
-    [ { 'line_num': 47, 'column_num': 12 }, 'Foo' ],
-    [ { 'line_num': 47, 'column_num': 17 }, 'int' ],
-    [ { 'line_num': 48, 'column_num': 12 }, 'Foo *' ],
-    [ { 'line_num': 48, 'column_num': 18 }, 'int' ],
+    [ { 'line_num': 47, 'column_num': 12 },
+      has_entry( 'message', contains_string( 'Foo' ) ),
+      requests.codes.ok ],
+    [ { 'line_num': 47, 'column_num': 17 },
+      has_entry( 'message', contains_string( 'int' ) ),
+      requests.codes.ok ],
+    [ { 'line_num': 48, 'column_num': 12 },
+      has_entry( 'message', contains_string( 'Foo *' ) ),
+      requests.codes.ok ],
+    [ { 'line_num': 48, 'column_num': 18 },
+      has_entry( 'message', contains_string( 'int' ) ),
+      requests.codes.ok ],
 
     # Auto in declaration
     # [ { 'line_num': 28, 'column_num':  3 }, 'struct Foo &' ],
     # [ { 'line_num': 28, 'column_num': 11 }, 'struct Foo &' ],
-    [ { 'line_num': 28, 'column_num': 18 }, 'struct Foo' ],
+    [ { 'line_num': 28, 'column_num': 18 },
+      has_entry( 'message', contains_string( 'struct Foo' ) ),
+      requests.codes.ok ],
     # [ { 'line_num': 29, 'column_num':  3 }, 'Foo *' ],
     # [ { 'line_num': 29, 'column_num': 11 }, 'Foo *' ],
-    [ { 'line_num': 29, 'column_num': 18 }, 'Foo' ],
+    [ { 'line_num': 29, 'column_num': 18 },
+      has_entry( 'message', contains_string( 'Foo' ) ),
+      requests.codes.ok ],
     # [ { 'line_num': 31, 'column_num':  3 }, 'const Foo &' ],
     # [ { 'line_num': 31, 'column_num': 16 }, 'const Foo &' ],
     # [ { 'line_num': 32, 'column_num':  3 }, 'const Foo *' ],
@@ -323,33 +442,73 @@ def Subcommands_GetType_test():
     # [ { 'line_num': 34, 'column_num': 21 }, 'const int' ],
     # [ { 'line_num': 35, 'column_num': 14 }, 'const Foo *' ],
     # [ { 'line_num': 35, 'column_num': 22 }, 'const int' ],
-    [ { 'line_num': 36, 'column_num': 13 }, 'Foo' ],
-    [ { 'line_num': 36, 'column_num': 19 }, 'int' ],
+    [ { 'line_num': 36, 'column_num': 13 },
+      has_entry( 'message', contains_string( 'Foo' ) ),
+      requests.codes.ok ],
+    [ { 'line_num': 36, 'column_num': 19 },
+      has_entry( 'message', contains_string( 'int' ) ),
+      requests.codes.ok ],
     # [ { 'line_num': 37, 'column_num': 13 }, 'Foo *' ],
-    [ { 'line_num': 37, 'column_num': 20 }, 'int' ],
+    [ { 'line_num': 37, 'column_num': 20 },
+      has_entry( 'message', contains_string( 'int' ) ),
+      requests.codes.ok ],
 
     # Unicode
-    [ { 'line_num': 51, 'column_num': 13 }, 'Unicøde *' ],
+    [ { 'line_num': 51, 'column_num': 13 },
+      has_entry( 'message', contains_string( 'Unicøde *' ) ),
+      requests.codes.ok ],
 
     # Bound methods
     # On Win32, methods pick up an __attribute__((thiscall)) to annotate their
     # calling convention.  This shows up in the type, which isn't ideal, but
     # also prohibitively complex to try and strip out.
     [ { 'line_num': 53, 'column_num': 15 },
-      matches_regexp(
-          r'int bar\(int i\)(?: __attribute__\(\(thiscall\)\))?' ), True ],
+      has_entry( 'message', matches_regexp(
+          r'int bar\(int i\)(?: __attribute__\(\(thiscall\)\))?' ) ),
+      requests.codes.ok ],
     [ { 'line_num': 54, 'column_num': 18 },
-      matches_regexp(
-          r'int bar\(int i\)(?: __attribute__\(\(thiscall\)\))?' ), True ],
+      has_entry( 'message', matches_regexp(
+          r'int bar\(int i\)(?: __attribute__\(\(thiscall\)\))?' ) ),
+      requests.codes.ok ],
   ]
 
-  for test in tests:
-    yield ( RunGetSemanticTest,
-            PathToTestFile( 'GetType_Clang_test.cc' ),
-            'cpp',
-            test,
-            [ 'GetType' ],
-            len( test ) > 2 )
+  for subcommand in [ 'GetType', 'GetTypeImprecise' ]:
+    for test in tests:
+      yield ( RunGetSemanticTest,
+              PathToTestFile( 'GetType_Clang_test.cc' ),
+              'cpp',
+              test,
+              [ subcommand ],
+              test[ 2 ] )
+
+
+def Subcommands_GetDoc_test():
+  tests = [
+    # from local file
+    [ { 'line_num': 5, 'column_num': 10 },
+      has_entry( 'detailed_info', contains_string( 'docstring' ) ),
+      requests.codes.ok ],
+    # from header
+    [ { 'line_num': 6, 'column_num': 10 },
+      has_entry( 'detailed_info', contains_string( 'docstring' ) ),
+      requests.codes.ok ],
+    # no docstring
+    [ { 'line_num': 7, 'column_num': 7 },
+      has_entry( 'detailed_info', contains_string( 'int x = 3' ) ),
+      requests.codes.ok ],
+    # no hover
+    [ { 'line_num': 8, 'column_num': 1 },
+      ErrorMatcher( RuntimeError, 'No documentation available.' ),
+      requests.codes.server_error ]
+  ]
+  for subcommand in [ 'GetDoc', 'GetDocImprecise' ]:
+    for test in tests:
+      yield ( RunGetSemanticTest,
+              PathToTestFile( 'GetDoc_Clang_test.cc' ),
+              'cpp',
+              test,
+              [ subcommand ],
+              test[ 2 ] )
 
 
 @SharedYcmd
@@ -481,25 +640,39 @@ def FixIt_Check_cpp11_Repl( results ):
 
 def FixIt_Check_cpp11_DelAdd( results ):
   assert_that( results, has_entries( {
-    'fixits': contains( has_entries( {
-      'chunks': contains(
-        has_entries( {
-          'replacement_text': equal_to( '' ),
-          'range': has_entries( {
-            'start': has_entries( { 'line_num': 48, 'column_num': 3 } ),
-            'end'  : has_entries( { 'line_num': 48, 'column_num': 4 } ),
+    'fixits': contains(
+      has_entries( {
+        'chunks': contains(
+          has_entries( {
+            'replacement_text': equal_to( '' ),
+            'range': has_entries( {
+              'start': has_entries( { 'line_num': 48, 'column_num': 3 } ),
+              'end'  : has_entries( { 'line_num': 48, 'column_num': 4 } ),
+            } ),
           } ),
-        } ),
-        has_entries( {
-          'replacement_text': equal_to( '~' ),
-          'range': has_entries( {
-            'start': has_entries( { 'line_num': 48, 'column_num': 9 } ),
-            'end'  : has_entries( { 'line_num': 48, 'column_num': 9 } ),
+          has_entries( {
+            'replacement_text': equal_to( '~' ),
+            'range': has_entries( {
+              'start': has_entries( { 'line_num': 48, 'column_num': 9 } ),
+              'end'  : has_entries( { 'line_num': 48, 'column_num': 9 } ),
+            } ),
           } ),
-        } ),
-      ),
-      'location': has_entries( { 'line_num': 48, 'column_num': 3 } )
-    } ) )
+        ),
+        'location': has_entries( { 'line_num': 48, 'column_num': 3 } )
+      } ),
+      has_entries( {
+        'chunks': contains(
+          has_entries( {
+            'replacement_text': equal_to( '= default;' ),
+            'range': has_entries( {
+              'start': has_entries( { 'line_num': 48, 'column_num': 15 } ),
+              'end'  : has_entries( { 'line_num': 48, 'column_num': 17 } ),
+            } ),
+          } ),
+        ),
+        'location': has_entries( { 'line_num': 48, 'column_num': 3 } )
+      } ),
+    )
   } ) )
 
 
@@ -560,7 +733,19 @@ def FixIt_Check_cpp11_MultiFirst( results ):
           } ),
         ),
         'location': has_entries( { 'line_num': 54, 'column_num': 15 } )
-      } )
+      } ),
+      has_entries( {
+        'chunks': contains(
+          has_entries( {
+            'replacement_text': equal_to( '= default;' ),
+            'range': has_entries( {
+              'start': has_entries( { 'line_num': 54, 'column_num': 64 } ),
+              'end'  : has_entries( { 'line_num': 54, 'column_num': 67 } ),
+            } ),
+          } )
+        ),
+        'location': has_entries( { 'line_num': 54, 'column_num': 15 } )
+      } ),
     )
   } ) )
 
@@ -600,7 +785,19 @@ def FixIt_Check_cpp11_MultiSecond( results ):
           } ),
         ),
         'location': has_entries( { 'line_num': 54, 'column_num': 51 } )
-      } )
+      } ),
+      has_entries( {
+        'chunks': contains(
+          has_entries( {
+            'replacement_text': equal_to( '= default;' ),
+            'range': has_entries( {
+              'start': has_entries( { 'line_num': 54, 'column_num': 64 } ),
+              'end'  : has_entries( { 'line_num': 54, 'column_num': 67 } ),
+            } ),
+          } )
+        ),
+        'location': has_entries( { 'line_num': 54, 'column_num': 51 } )
+      } ),
     )
   } ) )
 
@@ -610,10 +807,10 @@ def FixIt_Check_unicode_Ins( results ):
     'fixits': contains( has_entries( {
       'chunks': contains(
         has_entries( {
-          'replacement_text': equal_to( ';' ),
+          'replacement_text': equal_to( '=' ),
           'range': has_entries( {
-            'start': has_entries( { 'line_num': 21, 'column_num': 39 } ),
-            'end'  : has_entries( { 'line_num': 21, 'column_num': 39 } ),
+            'start': has_entries( { 'line_num': 21, 'column_num': 9 } ),
+            'end'  : has_entries( { 'line_num': 21, 'column_num': 11 } ),
           } ),
         } )
       ),
@@ -648,6 +845,12 @@ def FixIt_Check_cpp11_Note( results ):
                         LineColMatcher( 60, 9 ) )
         ),
         'location': LineColMatcher( 60, 1 ),
+      } ),
+      # Unresolved, requires /resolve_fixit request
+      has_entries( {
+        'text': 'Extract subexpression to variable',
+        'resolve': True,
+        'command': has_entries( { 'command': 'clangd.applyTweak' } )
       } )
     )
   } ) )
@@ -683,6 +886,61 @@ def FixIt_Check_cuda( results ):
         ),
         'location': LineColMatcher( 3, 12 ),
       } ) )
+  } ) )
+
+
+def FixIt_Check_SubexprExtract_Resolved( results ):
+  assert_that( results, has_entries( {
+    'fixits': contains( has_entries( {
+        'text': 'Extract subexpression to variable',
+        'chunks': contains(
+          ChunkMatcher( 'auto dummy = foo(i + 3);\n  ',
+                        LineColMatcher( 84, 3 ),
+                        LineColMatcher( 84, 3 ) ),
+          ChunkMatcher( 'dummy',
+                        LineColMatcher( 84, 10 ),
+                        LineColMatcher( 84, 22 ) ),
+        )
+    } ) )
+  } ) )
+
+
+def FixIt_Check_RawStringReplace_Resolved( results ):
+  assert_that( results, has_entries( {
+    'fixits': contains( has_entries( {
+        'text': 'Convert to raw string',
+        'chunks': contains(
+          ChunkMatcher( 'R"(\\\\r\\asd\n\\v)"',
+                        LineColMatcher( 80, 19 ),
+                        LineColMatcher( 80, 36 ) ),
+        )
+    } ) )
+  } ) )
+
+
+def FixIt_Check_MacroExpand_Resolved( results ):
+  assert_that( results, has_entries( {
+    'fixits': contains( has_entries( {
+        'text': "Expand macro 'DECLARE_INT'",
+        'chunks': contains(
+          ChunkMatcher( 'int i',
+                        LineColMatcher( 83,  3 ),
+                        LineColMatcher( 83, 17 ) ),
+        )
+    } ) )
+  } ) )
+
+
+def FixIt_Check_AutoExpand_Resolved( results ):
+  assert_that( results, has_entries( {
+    'fixits': contains( has_entries( {
+        'text': "Expand auto type",
+        'chunks': contains(
+          ChunkMatcher( 'const char *',
+                        LineColMatcher( 80, 1 ),
+                        LineColMatcher( 80, 6 ) ),
+        )
+    } ) )
   } ) )
 
 
@@ -728,6 +986,92 @@ def Subcommands_FixIt_all_test():
     yield RunFixItTest, test[ 0 ], test[ 1 ], test[ 2 ], test[ 3 ], test[ 4 ]
 
 
+@WithRetry
+@SharedYcmd
+def RunRangedFixItTest( app, rng, expected ):
+  contents = ReadFile( PathToTestFile( 'FixIt_Clang_cpp11.cpp' ) )
+  args = {
+    'completer_target' : 'filetype_default',
+    'contents'         : contents,
+    'filepath'         : PathToTestFile( 'FixIt_Clang_cpp11.cpp' ),
+    'command_arguments': [ 'FixIt' ],
+    'range'            : rng,
+    'filetype'         : 'cpp'
+  }
+  app.post_json( '/event_notification',
+                 CombineRequest( args, {
+                   'event_name': 'FileReadyToParse',
+                 } ),
+                 expect_errors = True )
+  WaitUntilCompleterServerReady( app, 'cpp' )
+  response = app.post_json( '/run_completer_command',
+                            BuildRequest( **args ) ).json
+  args[ 'fixit' ] = response[ 'fixits' ][ 0 ]
+  response = app.post_json( '/resolve_fixit',
+                            BuildRequest( **args ) ).json
+  print( 'Resolved fixit response = ' )
+  print( response )
+  expected( response )
+
+
+def Subcommands_FixIt_Ranged_test():
+  expand_auto_range = {
+    'start': { 'line_num': 80, 'column_num': 1 },
+    'end': { 'line_num': 80, 'column_num': 4 },
+  }
+  subexpression_extract_range = {
+    'start': { 'line_num': 84, 'column_num': 14 },
+    'end': { 'line_num': 84, 'column_num': 20 },
+  }
+  macro_expand_range = {
+    'start': { 'line_num': 83, 'column_num': 3 },
+    'end': { 'line_num': 83, 'column_num': 13 },
+  }
+  raw_string_range = {
+    'start': { 'line_num': 80, 'column_num': 19 },
+    'end': { 'line_num': 80, 'column_num': 35 },
+  }
+  tests = [
+    [ expand_auto_range, FixIt_Check_AutoExpand_Resolved ],
+    [ macro_expand_range, FixIt_Check_MacroExpand_Resolved ],
+    [ subexpression_extract_range, FixIt_Check_SubexprExtract_Resolved ],
+    [ raw_string_range, FixIt_Check_RawStringReplace_Resolved ],
+  ]
+  for test in tests:
+    yield RunRangedFixItTest, test[ 0 ], test[ 1 ]
+
+
+@WithRetry
+@SharedYcmd
+def Subcommands_FixIt_AlreadyResolved_test( app ):
+  filename = PathToTestFile( 'FixIt_Clang_cpp11.cpp' )
+  request = {
+    'completer_target' : 'filetype_default',
+    'contents'         : ReadFile( filename ),
+    'filepath'         : filename,
+    'command_arguments': [ 'FixIt' ],
+    'line_num'         : 16,
+    'column_num'       : 1,
+    'filetype'         : 'cpp'
+  }
+  app.post_json( '/event_notification',
+                 CombineRequest( request, {
+                   'event_name': 'FileReadyToParse',
+                 } ),
+                 expect_errors = True )
+  WaitUntilCompleterServerReady( app, 'cpp' )
+  expected = app.post_json( '/run_completer_command',
+                            BuildRequest( **request ) ).json
+  print( 'expected = ' )
+  print( expected )
+  request[ 'fixit' ] = expected[ 'fixits' ][ 0 ]
+  actual = app.post_json( '/resolve_fixit',
+                          BuildRequest( **request ) ).json
+  print( 'actual = ' )
+  print( actual )
+  assert_that( actual, equal_to( expected ) )
+
+
 @SharedYcmd
 def Subcommands_RefactorRename_test( app ):
   test = {
@@ -751,17 +1095,27 @@ def Subcommands_RefactorRename_test( app ):
             ChunkMatcher( 'Bar',
                           LineColMatcher( 9, 3 ),
                           LineColMatcher( 9, 6 ) ),
-            # NOTE: Bug in clangd. It returns the same chunk twice which is a
-            # strict protocol violation.
+            ChunkMatcher( '\n\n',
+                          LineColMatcher( 12, 2 ),
+                          LineColMatcher( 15, 1 ) ),
             ChunkMatcher( 'Bar',
-                          LineColMatcher( 15, 8 ),
+                          LineColMatcher( 15,  8 ),
                           LineColMatcher( 15, 11 ) ),
-            ChunkMatcher( 'Bar',
-                          LineColMatcher( 15, 8 ),
-                          LineColMatcher( 15, 11 ) ),
+            ChunkMatcher( ' ',
+                          LineColMatcher( 15,  46 ),
+                          LineColMatcher( 16,  1 ) ),
             ChunkMatcher( 'Bar',
                           LineColMatcher( 17, 3 ),
-                          LineColMatcher( 17, 6 ) )
+                          LineColMatcher( 17, 6 ) ),
+            ChunkMatcher( '',
+                          LineColMatcher( 17, 14 ),
+                          LineColMatcher( 17, 15 ) ),
+            ChunkMatcher( ' ',
+                          LineColMatcher( 17, 17 ),
+                          LineColMatcher( 17, 17 ) ),
+            ChunkMatcher( ' ',
+                          LineColMatcher( 17, 19 ),
+                          LineColMatcher( 17, 19 ) ),
           )
         } ) )
       } )

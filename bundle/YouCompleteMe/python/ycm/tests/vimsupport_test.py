@@ -32,8 +32,8 @@ MockVimModule()
 
 from ycm import vimsupport
 from nose.tools import eq_
-from hamcrest import ( assert_that, calling, contains, empty, equal_to,
-                       has_entry, raises )
+from hamcrest import ( assert_that, calling, contains_exactly, empty, equal_to,
+                       has_entry, is_not, raises )
 from mock import MagicMock, call, patch
 from ycmd.utils import ToBytes
 import os
@@ -168,7 +168,8 @@ def OpenLocationList_test( vim_command, fitting_height, variable_exists ):
     call( 'augroup ycmlocation' ),
     call( 'autocmd! * <buffer>' ),
     call( 'autocmd WinLeave <buffer> '
-          'if bufnr( "%" ) == expand( "<abuf>" ) | q | endif' ),
+          'if bufnr( "%" ) == expand( "<abuf>" ) | q | endif '
+          '| autocmd! ycmlocation' ),
     call( 'augroup END' ),
     call( 'doautocmd User YcmLocationOpened' ),
     call( 'silent! wincmd p' )
@@ -618,7 +619,7 @@ def ReplaceChunk_CursorPosition_test():
 
   AssertBuffersAreEqualAsBytes( [ 'xyz', 'foobar' ], result_buffer )
   # Cursor line is 0-based.
-  assert_that( vimsupport.CurrentLineAndColumn(), contains( 1, 6 ) )
+  assert_that( vimsupport.CurrentLineAndColumn(), contains_exactly( 1, 6 ) )
 
 
 def _BuildLocations( start_line, start_column, end_line, end_column ):
@@ -1650,10 +1651,10 @@ def SelectFromList_Negative_test( vim_eval ):
 def Filetypes_IntegerFiletype_test():
   current_buffer = VimBuffer( 'buffer', number = 1, filetype = '42' )
   with MockVimBuffers( [ current_buffer ], [ current_buffer ] ):
-    assert_that( vimsupport.CurrentFiletypes(), contains( '42' ) )
-    assert_that( vimsupport.GetBufferFiletypes( 1 ), contains( '42' ) )
+    assert_that( vimsupport.CurrentFiletypes(), contains_exactly( '42' ) )
+    assert_that( vimsupport.GetBufferFiletypes( 1 ), contains_exactly( '42' ) )
     assert_that( vimsupport.FiletypesForBuffer( current_buffer ),
-                 contains( '42' ) )
+                 contains_exactly( '42' ) )
 
 
 @patch( 'ycm.vimsupport.VariableExists', return_value = False )
@@ -2008,3 +2009,36 @@ def VimVersionAtLeast_test():
   assert_that( not vimsupport.VimVersionAtLeast( '7.4.1579' ) )
   assert_that( not vimsupport.VimVersionAtLeast( '7.4.1898' ) )
   assert_that( not vimsupport.VimVersionAtLeast( '8.1.278' ) )
+
+
+@patch( 'ycm.vimsupport.GetIntValue', return_value = 1 )
+def VimSupportsPopupWindows_Memo_test( *args ):
+  vimsupport.MEMO = {}
+
+  try:
+    assert_that( vimsupport.VimSupportsPopupWindows() )
+    assert_that( vimsupport.MEMO, is_not( empty() ) )
+
+    # If the momizer did not step in, we would throw an error in the following
+    # call to VimVersionAtLeast
+    with patch( 'ycm.vimsupport.VimHasFunctions', side_effect = RuntimeError ):
+      assert_that( vimsupport.VimSupportsPopupWindows() )
+  finally:
+    vimsupport.MEMO = {}
+
+
+@patch( 'ycm.vimsupport.GetIntValue', return_value = 1 )
+def VimHasFunction_Memo_test( GetIntValue ):
+  vimsupport.MEMO = {}
+
+  try:
+    assert_that( vimsupport.VimHasFunction( 'test' ) )
+    assert_that( vimsupport.MEMO, is_not( empty() ) )
+
+    GetIntValue.return_value = 0
+
+    # If the memoizer didn't kick in, the following call would return False
+    assert_that( vimsupport.VimHasFunction( 'test' ) )
+
+  finally:
+    vimsupport.MEMO = {}

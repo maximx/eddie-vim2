@@ -79,6 +79,29 @@ NO_COMPLETIONS = {
   'completions': []
 }
 
+# checking for existence of funcitons is a little slow and can't change at
+# tuntime, so we cache the results
+MEMO = {}
+
+
+def memoize( func ):
+  global MEMO
+
+  import functools
+
+  @functools.wraps( func )
+  def wrapper( *args, **kwargs ):
+    dct = MEMO.setdefault( func, {} )
+    key = ( args, frozenset( kwargs.items() ) )
+    try:
+      return dct[ key ]
+    except KeyError:
+      result = func( *args, **kwargs )
+      dct[ key ] = result
+      return result
+
+  return wrapper
+
 
 def CurrentLineAndColumn():
   """Returns the 0-based current line and 0-based current column."""
@@ -262,6 +285,8 @@ def GetDiagnosticMatchesInCurrentWindow():
 
 
 def AddDiagnosticMatch( match ):
+  # TODO: Use matchaddpos which is much faster given that we always are using a
+  # location rather than an actual pattern
   return GetIntValue( "matchadd('{}', '{}')".format( match.group,
                                                      match.pattern ) )
 
@@ -1253,5 +1278,39 @@ def AutoCloseOnCurrentBuffer( name ):
   vim.command( 'augroup {}'.format( name ) )
   vim.command( 'autocmd! * <buffer>' )
   vim.command( 'autocmd WinLeave <buffer> '
-               'if bufnr( "%" ) == expand( "<abuf>" ) | q | endif' )
+               'if bufnr( "%" ) == expand( "<abuf>" ) | q | endif '
+               '| autocmd! {}'.format( name ) )
   vim.command( 'augroup END' )
+
+
+@memoize
+def VimSupportsPopupWindows():
+  return VimHasFunctions( 'popup_create',
+                          'popup_move',
+                          'popup_hide',
+                          'popup_settext',
+                          'popup_show',
+                          'popup_close',
+                          'prop_add',
+                          'prop_type_add' )
+
+
+@memoize
+def VimHasFunction( func ):
+  return bool( GetIntValue( "exists( '*{}' )".format( EscapeForVim( func ) ) ) )
+
+
+def VimHasFunctions( *functions ):
+  return all( VimHasFunction( f ) for f in functions )
+
+
+def WinIDForWindow( window ):
+  return GetIntValue( 'win_getid( {}, {} )'.format( window.number,
+                                                    window.tabpage.number ) )
+
+
+def ScreenPositionForLineColumnInWindow( window, line, column ):
+  return vim.eval( 'screenpos( {}, {}, {} )'.format(
+      WinIDForWindow( window ),
+      line,
+      column ) )

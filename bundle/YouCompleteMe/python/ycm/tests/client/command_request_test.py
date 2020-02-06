@@ -110,7 +110,8 @@ class GoToResponse_QuickFix_test( object ):
       call( 'augroup ycmquickfix' ),
       call( 'autocmd! * <buffer>' ),
       call( 'autocmd WinLeave <buffer> '
-            'if bufnr( "%" ) == expand( "<abuf>" ) | q | endif' ),
+            'if bufnr( "%" ) == expand( "<abuf>" ) | q | endif '
+            '| autocmd! ycmquickfix' ),
       call( 'augroup END' ),
       call( 'doautocmd User YcmQuickFixOpened' )
     ] )
@@ -174,6 +175,7 @@ class Response_Detection_test( object ):
 
     basic_fixit = {
       'fixits': [ {
+        'resolve': False,
         'chunks': [ {
           'dummy chunk contents': True
         } ]
@@ -184,11 +186,13 @@ class Response_Detection_test( object ):
     multi_fixit = {
       'fixits': [ {
         'text': 'first',
+        'resolve': False,
         'chunks': [ {
           'dummy chunk contents': True
         } ]
       }, {
         'text': 'second',
+        'resolve': False,
         'chunks': [ {
           'dummy chunk contents': False
         } ]

@@ -1,4 +1,4 @@
-# Copyright (C) 2011-2018 ycmd contributors
+# Copyright (C) 2011-2019 ycmd contributors
 #
 # This file is part of ycmd.
 #
@@ -23,8 +23,11 @@ from __future__ import absolute_import
 from builtins import *  # noqa
 
 from ycmd import extra_conf_store, responses
-from ycmd.completers.completer import Completer
-from ycmd.utils import ExpandVariablesInPath, FindExecutable, LOGGER
+from ycmd.completers.completer import Completer, SignatureHelpAvailalability
+from ycmd.utils import ( CodepointOffsetToByteOffset,
+                         ExpandVariablesInPath,
+                         FindExecutable,
+                         LOGGER )
 
 import os
 import jedi
@@ -45,6 +48,7 @@ class PythonCompleter( Completer ):
     self._environment_for_file = {}
     self._environment_for_interpreter_path = {}
     self._sys_path_for_file = {}
+    self.SetSignatureHelpTriggers( [ '(', ',' ] )
 
 
   def SupportedFiletypes( self ):
@@ -67,16 +71,17 @@ class PythonCompleter( Completer ):
       pass
 
     module = extra_conf_store.ModuleForSourceFile( filepath )
-    settings = self._GetSettings( module, client_data )
+    settings = self._GetSettings( module, filepath, client_data )
     self._settings_for_file[ filepath, client_data ] = settings
     return settings
 
 
-  def _GetSettings( self, module, client_data ):
+  def _GetSettings( self, module, filepath, client_data ):
     # We don't warn the user if no extra conf file is found.
     if module:
       if hasattr( module, 'Settings' ):
         settings = module.Settings( language = 'python',
+                                    filename = filepath,
                                     client_data = client_data )
         if settings is not None:
           return settings
@@ -161,12 +166,12 @@ class PythonCompleter( Completer ):
     line = request_data[ 'line_num' ]
     # Jedi expects columns to start at 0, not 1, and for them to be Unicode
     # codepoint offsets.
-    col = request_data[ 'start_codepoint' ] - 1
+    column = request_data[ 'start_codepoint' ] - 1
     environment = self._EnvironmentForRequest( request_data )
     sys_path = self._SysPathForFile( request_data, environment )
     return jedi.Script( source,
                         line,
-                        col,
+                        column,
                         path,
                         sys_path = sys_path,
                         environment = environment )
@@ -187,12 +192,65 @@ class PythonCompleter( Completer ):
 
   def ComputeCandidatesInner( self, request_data ):
     with self._jedi_lock:
+      completions = self._GetJediScript( request_data ).completions()
       return [ responses.BuildCompletionData(
         insertion_text = completion.name,
         # We store the Completion object returned by Jedi in the extra_data
         # field to detail the candidates once the filtering is done.
         extra_data = completion
-      ) for completion in self._GetJediScript( request_data ).completions() ]
+      ) for completion in completions ]
+
+
+  def SignatureHelpAvailable( self ):
+    return SignatureHelpAvailalability.AVAILABLE
+
+
+  def ComputeSignaturesInner( self, request_data ):
+    with self._jedi_lock:
+      signatures = self._GetJediScript( request_data ).call_signatures()
+      # Sorting by the number or arguments makes the order stable for the tests
+      # and isn't harmful. The order returned by jedi seems to be arbitrary.
+      signatures.sort( key=lambda s: len( s.params ) )
+
+      active_signature = 0
+      active_parameter = 0
+      for index, signature in enumerate( signatures ):
+        if signature.index is not None:
+          active_signature = index
+          active_parameter = signature.index
+          break
+
+      def MakeSignature( s ):
+        label = s.description + '( '
+        parameters = []
+        for index, p in enumerate( s.params ):
+          # We remove 'param ' from the start of each parameter (hence the 6:)
+          param = p.description[ 6: ]
+
+          start = len( label )
+          end = start + len( param )
+
+          label += param
+          if index < len( s.params ) - 1:
+            label += ', '
+
+          parameters.append( {
+            'label': [ CodepointOffsetToByteOffset( label, start ),
+                       CodepointOffsetToByteOffset( label, end ) ]
+          } )
+
+        label += ' )'
+
+        return {
+          'label': label,
+          'parameters': parameters,
+        }
+
+      return {
+        'activeSignature': active_signature,
+        'activeParameter': active_parameter,
+        'signatures': [ MakeSignature( s ) for s in signatures ],
+      }
 
 
   def DetailCandidates( self, request_data, candidates ):
@@ -211,12 +269,12 @@ class PythonCompleter( Completer ):
 
   def GetSubcommandsMap( self ):
     return {
+      'GoTo'           : ( lambda self, request_data, args:
+                           self._GoToDefinition( request_data ) ),
       'GoToDefinition' : ( lambda self, request_data, args:
                            self._GoToDefinition( request_data ) ),
       'GoToDeclaration': ( lambda self, request_data, args:
-                           self._GoToDeclaration( request_data ) ),
-      'GoTo'           : ( lambda self, request_data, args:
-                           self._GoTo( request_data ) ),
+                           self._GoToDefinition( request_data ) ),
       'GoToReferences' : ( lambda self, request_data, args:
                            self._GoToReferences( request_data ) ),
       'GetType'        : ( lambda self, request_data, args:
@@ -226,33 +284,36 @@ class PythonCompleter( Completer ):
     }
 
 
+  def _BuildGoToResponse( self, definitions ):
+    if len( definitions ) == 1:
+      definition = definitions[ 0 ]
+      return responses.BuildGoToResponse( definition.module_path,
+                                          definition.line,
+                                          definition.column + 1 )
+
+    gotos = []
+    for definition in definitions:
+      gotos.append( responses.BuildGoToResponse( definition.module_path,
+                                                 definition.line,
+                                                 definition.column + 1,
+                                                 definition.description ) )
+    return gotos
+
+
   def _GoToDefinition( self, request_data ):
     with self._jedi_lock:
       definitions = self._GetJediScript( request_data ).goto_definitions()
       if definitions:
         return self._BuildGoToResponse( definitions )
-    raise RuntimeError( 'Can\'t jump to definition.' )
+    raise RuntimeError( 'Can\'t jump to type definition.' )
 
 
-  def _GoToDeclaration( self, request_data ):
+  def _GoToReferences( self, request_data ):
     with self._jedi_lock:
-      definitions = self._GetJediScript( request_data ).goto_assignments()
+      definitions = self._GetJediScript( request_data ).usages()
       if definitions:
         return self._BuildGoToResponse( definitions )
-    raise RuntimeError( 'Can\'t jump to declaration.' )
-
-
-  def _GoTo( self, request_data ):
-    try:
-      return self._GoToDefinition( request_data )
-    except Exception:
-      LOGGER.exception( 'Failed to jump to definition' )
-
-    try:
-      return self._GoToDeclaration( request_data )
-    except Exception:
-      LOGGER.exception( 'Failed to jump to declaration' )
-      raise RuntimeError( 'Can\'t jump to definition or declaration.' )
+    raise RuntimeError( 'Can\'t find references.' )
 
 
   # This method must be called under Jedi's lock.
@@ -288,36 +349,6 @@ class PythonCompleter( Completer ):
     if documentation:
       return responses.BuildDetailedInfoResponse( documentation )
     raise RuntimeError( 'No documentation available.' )
-
-
-  def _GoToReferences( self, request_data ):
-    with self._jedi_lock:
-      definitions = self._GetJediScript( request_data ).usages()
-      if definitions:
-        return self._BuildGoToResponse( definitions )
-    raise RuntimeError( 'Can\'t find references.' )
-
-
-  def _BuildGoToResponse( self, definitions ):
-    if len( definitions ) == 1:
-      definition = definitions[ 0 ]
-      if definition.in_builtin_module():
-        raise RuntimeError( 'Can\'t jump to builtin module.' )
-      return responses.BuildGoToResponse( definition.module_path,
-                                          definition.line,
-                                          definition.column + 1 )
-
-    gotos = []
-    for definition in definitions:
-      if definition.in_builtin_module():
-        gotos.append( responses.BuildDescriptionOnlyGoToResponse(
-          'Builtin {}'.format( definition.description ) ) )
-      else:
-        gotos.append( responses.BuildGoToResponse( definition.module_path,
-                                                   definition.line,
-                                                   definition.column + 1,
-                                                   definition.description ) )
-    return gotos
 
 
   def DebugInfo( self, request_data ):
