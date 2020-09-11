@@ -33,16 +33,19 @@ setup(name='jedi',
       keywords='python completion refactoring vim',
       long_description=readme,
       packages=find_packages(exclude=['test', 'test.*']),
-      python_requires='>=2.7, !=3.0.*, !=3.1.*, !=3.2.*, !=3.3.*',
+      python_requires='>=2.7, !=3.0.*, !=3.1.*, !=3.2.*, !=3.3.*, !=3.4.*',
       install_requires=install_requires,
       extras_require={
           'testing': [
-              # Pytest 5 doesn't support Python 2 and Python 3.4 anymore.
-              'pytest>=3.1.0,<5.0.0',
+              # Pytest 5 doesn't support Python 2 anymore.
+              'pytest>=3.9.0,<5.0.0',
               # docopt for sith doctests
               'docopt',
               # coloroma for colored debug output
               'colorama',
+          ],
+          'qa': [
+              'flake8==3.7.9',
           ],
       },
       package_data={'jedi': ['*.pyi', 'third_party/typeshed/LICENSE',
@@ -57,7 +60,6 @@ setup(name='jedi',
           'Programming Language :: Python :: 2',
           'Programming Language :: Python :: 2.7',
           'Programming Language :: Python :: 3',
-          'Programming Language :: Python :: 3.4',
           'Programming Language :: Python :: 3.5',
           'Programming Language :: Python :: 3.6',
           'Programming Language :: Python :: 3.7',

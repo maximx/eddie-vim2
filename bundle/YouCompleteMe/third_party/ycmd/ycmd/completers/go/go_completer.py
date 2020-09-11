@@ -1,4 +1,4 @@
-# Copyright (C) 2019 ycmd contributors
+# Copyright (C) 2020 ycmd contributors
 #
 # This file is part of ycmd.
 #
@@ -15,20 +15,12 @@
 # You should have received a copy of the GNU General Public License
 # along with ycmd.  If not, see <http://www.gnu.org/licenses/>.
 
-from __future__ import unicode_literals
-from __future__ import print_function
-from __future__ import division
-from __future__ import absolute_import
-# Not installing aliases from python-future; it's unreliable and slow.
-from builtins import *  # noqa
-
 import json
 import logging
 import os
 
 from ycmd import responses
 from ycmd import utils
-from ycmd.completers.language_server import simple_language_server_completer
 from ycmd.completers.language_server import language_server_completer
 
 
@@ -38,26 +30,27 @@ PATH_TO_GOPLS = os.path.abspath( os.path.join( os.path.dirname( __file__ ),
   '..',
   'third_party',
   'go',
-  'src',
-  'golang.org',
-  'x',
-  'tools',
-  'cmd',
-  'gopls',
+  'bin',
   utils.ExecutableName( 'gopls' ) ) )
 
 
 def ShouldEnableGoCompleter( user_options ):
-  server_exists = os.path.isfile( PATH_TO_GOPLS )
+  server_exists = utils.FindExecutableWithFallback(
+      user_options[ 'gopls_binary_path' ],
+      PATH_TO_GOPLS )
   if server_exists:
     return True
   utils.LOGGER.info( 'No gopls executable at %s.', PATH_TO_GOPLS )
   return False
 
 
-class GoCompleter( simple_language_server_completer.SimpleLSPCompleter ):
+class GoCompleter( language_server_completer.LanguageServerCompleter ):
   def __init__( self, user_options ):
-    super( GoCompleter, self ).__init__( user_options )
+    super().__init__( user_options )
+    self._user_supplied_gopls_args = user_options[ 'gopls_args' ]
+    self._gopls_path = utils.FindExecutableWithFallback(
+        user_options[ 'gopls_binary_path' ],
+        PATH_TO_GOPLS )
 
 
   def GetServerName( self ):
@@ -73,7 +66,9 @@ class GoCompleter( simple_language_server_completer.SimpleLSPCompleter ):
 
 
   def GetCommandLine( self ):
-    cmdline = [ PATH_TO_GOPLS, '-logfile', self._stderr_file ]
+    cmdline = [ self._gopls_path ] + self._user_supplied_gopls_args + [
+                '-logfile',
+                self._stderr_file ]
     if utils.LOGGER.isEnabledFor( logging.DEBUG ):
       cmdline.append( '-rpc.trace' )
     return cmdline
@@ -84,7 +79,7 @@ class GoCompleter( simple_language_server_completer.SimpleLSPCompleter ):
 
 
   def GetDoc( self, request_data ):
-    assert self._settings[ 'hoverKind' ] == 'Structured'
+    assert self._settings[ 'ls' ][ 'hoverKind' ] == 'Structured'
     try:
       result = json.loads( self.GetHoverResponse( request_data )[ 'value' ] )
       docs = result[ 'signature' ] + '\n' + result[ 'fullDocumentation' ]
@@ -103,5 +98,20 @@ class GoCompleter( simple_language_server_completer.SimpleLSPCompleter ):
 
 
   def DefaultSettings( self, request_data ):
-    return { 'hoverKind': 'Structured',
-             'fuzzyMatching': False }
+    return {
+      'hoverKind': 'Structured',
+      'fuzzyMatching': False,
+    }
+
+
+  def CodeActionLiteralToFixIt( self, request_data, code_action_literal ):
+    document_changes = code_action_literal[ 'edit' ][ 'documentChanges' ]
+    for text_document_edit in document_changes:
+      for text_edit in text_document_edit[ 'edits' ]:
+        end_line = text_edit[ 'range' ][ 'end' ][ 'line' ]
+        # LSP offsets are zero based, plus `request_data[ 'lines' ]` contains
+        # a trailing empty line.
+        if end_line >= len( request_data[ 'lines' ] ) - 1:
+          return None
+
+    return super().CodeActionLiteralToFixIt( request_data, code_action_literal )

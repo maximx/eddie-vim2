@@ -1,6 +1,4 @@
-# encoding: utf-8
-#
-# Copyright (C) 2017-2019 ycmd contributors
+# Copyright (C) 2017-2020 ycmd contributors
 #
 # This file is part of ycmd.
 #
@@ -17,21 +15,15 @@
 # You should have received a copy of the GNU General Public License
 # along with ycmd.  If not, see <http://www.gnu.org/licenses/>.
 
-from __future__ import print_function
-from __future__ import absolute_import
-from __future__ import unicode_literals
-from __future__ import division
-# Not installing aliases from python-future; it's unreliable and slow.
-from builtins import *  # noqa
-
 from hamcrest import ( assert_that,
-                       contains,
+                       contains_exactly,
                        contains_inanyorder,
                        empty,
+                       equal_to,
                        matches_regexp,
                        has_entries,
-                       has_item )
-from nose.tools import eq_
+                       has_item,
+                       has_items )
 
 from pprint import pformat
 import requests
@@ -47,7 +39,7 @@ from ycmd.tests.test_utils import ( CombineRequest,
                                     LocationMatcher,
                                     WithRetry )
 from ycmd.utils import ReadFile
-from mock import patch
+from unittest.mock import patch
 
 
 def ProjectPath( *args ):
@@ -90,27 +82,40 @@ def RunTest( app, test ):
 
   print( 'completer response: {0}'.format( pformat( response.json ) ) )
 
-  eq_( response.status_code, test[ 'expect' ][ 'response' ] )
+  assert_that( response.status_code,
+               equal_to( test[ 'expect' ][ 'response' ] ) )
 
   assert_that( response.json, test[ 'expect' ][ 'data' ] )
 
 
 PUBLIC_OBJECT_METHODS = [
-  CompletionEntryMatcher( 'equals', 'Object', { 'kind': 'Method' } ),
-  CompletionEntryMatcher( 'getClass', 'Object', { 'kind': 'Method' } ),
-  CompletionEntryMatcher( 'hashCode', 'Object', { 'kind': 'Method' } ),
-  CompletionEntryMatcher( 'notify', 'Object', { 'kind': 'Method' } ),
-  CompletionEntryMatcher( 'notifyAll', 'Object', { 'kind': 'Method' } ),
-  CompletionEntryMatcher( 'toString', 'Object', { 'kind': 'Method' } ),
-  CompletionEntryMatcher( 'wait', 'Object', {
+  CompletionEntryMatcher( 'equals',
+                          'Object.equals(Object arg0) : boolean',
+                          { 'kind': 'Method' } ),
+  CompletionEntryMatcher( 'getClass',
+                          'Object.getClass() : Class<?>',
+                          { 'kind': 'Method' } ),
+  CompletionEntryMatcher( 'hashCode',
+                          'Object.hashCode() : int',
+                          { 'kind': 'Method' } ),
+  CompletionEntryMatcher( 'notify',
+                          'Object.notify() : void',
+                          { 'kind': 'Method' } ),
+  CompletionEntryMatcher( 'notifyAll',
+                          'Object.notifyAll() : void',
+                          { 'kind': 'Method' } ),
+  CompletionEntryMatcher( 'toString',
+                          'Object.toString() : String',
+                          { 'kind': 'Method' } ),
+  CompletionEntryMatcher( 'wait', 'Object.wait(long arg0, int arg1) : void', {
     'menu_text': matches_regexp( 'wait\\(long .*, int .*\\) : void' ),
     'kind': 'Method',
   } ),
-  CompletionEntryMatcher( 'wait', 'Object', {
+  CompletionEntryMatcher( 'wait', 'Object.wait(long arg0) : void', {
     'menu_text': matches_regexp( 'wait\\(long .*\\) : void' ),
     'kind': 'Method',
   } ),
-  CompletionEntryMatcher( 'wait', 'Object', {
+  CompletionEntryMatcher( 'wait', 'Object.wait() : void', {
     'menu_text': 'wait() : void',
     'kind': 'Method',
   } ),
@@ -142,15 +147,15 @@ def GetCompletions_NoQuery_test( app ):
     'expect': {
       'response': requests.codes.ok,
       'data': has_entries( {
-        'completions': contains_inanyorder(
-          *WithObjectMethods(
-            CompletionEntryMatcher( 'test', 'TestFactory.Bar', {
+        'completions': has_items(
+            CompletionEntryMatcher( 'test', 'TestFactory.Bar.test : int', {
               'kind': 'Field'
             } ),
-            CompletionEntryMatcher( 'testString', 'TestFactory.Bar', {
-              'kind': 'Field'
-            } )
-          )
+            CompletionEntryMatcher( 'testString',
+                                    'TestFactory.Bar.testString : String',
+                                    {
+                                      'kind': 'Field'
+                                    } )
         ),
         'errors': empty(),
       } )
@@ -172,12 +177,14 @@ def GetCompletions_WithQuery_test( app ):
       'response': requests.codes.ok,
       'data': has_entries( {
         'completions': contains_inanyorder(
-            CompletionEntryMatcher( 'test', 'TestFactory.Bar', {
+          CompletionEntryMatcher( 'test', 'TestFactory.Bar.test : int', {
               'kind': 'Field'
             } ),
-            CompletionEntryMatcher( 'testString', 'TestFactory.Bar', {
-              'kind': 'Field'
-            } )
+            CompletionEntryMatcher( 'testString',
+                                    'TestFactory.Bar.testString : String',
+                                    {
+                                      'kind': 'Field'
+                                    } )
         ),
         'errors': empty(),
       } )
@@ -201,12 +208,13 @@ def GetCompletions_DetailFromCache_test( app ):
         'data': has_entries( {
           'completion_start_column': 11,
           'completions': has_item(
-            CompletionEntryMatcher( 'doSomethingVaguelyUseful',
-                                    'AbstractTestWidget', {
-                                      'kind': 'Method',
-                                      'menu_text':
-                                        'doSomethingVaguelyUseful() : void',
-                                    } )
+            CompletionEntryMatcher(
+              'doSomethingVaguelyUseful',
+              'AbstractTestWidget.doSomethingVaguelyUseful() : void',
+              {
+                'kind': 'Method',
+                'menu_text': 'doSomethingVaguelyUseful() : void',
+              } )
           ),
           'errors': empty(),
         } )
@@ -228,7 +236,7 @@ def GetCompletions_Package_test( app ):
       'response': requests.codes.ok,
       'data': has_entries( {
         'completion_start_column': 9,
-        'completions': contains(
+        'completions': contains_exactly(
           CompletionEntryMatcher( 'com.test.wobble', None, {
             'kind': 'Module'
           } ),
@@ -253,8 +261,8 @@ def GetCompletions_Import_Class_test( app ):
       'response': requests.codes.ok,
       'data': has_entries( {
         'completion_start_column': 34,
-        'completions': contains(
-          CompletionEntryMatcher( 'Tset;', None, {
+        'completions': contains_exactly(
+          CompletionEntryMatcher( 'Tset', 'com.youcompleteme.testing.Tset', {
             'menu_text': 'Tset - com.youcompleteme.testing',
             'kind': 'Class',
           } )
@@ -280,7 +288,7 @@ def GetCompletions_Import_Classes_test( app ):
       'response': requests.codes.ok,
       'data': has_entries( {
         'completion_start_column': 52,
-        'completions': contains(
+        'completions': contains_exactly(
           CompletionEntryMatcher( 'A;', None, {
             'menu_text': 'A - com.test.wobble',
             'kind': 'Class',
@@ -319,7 +327,7 @@ def GetCompletions_Import_ModuleAndClass_test( app ):
       'response': requests.codes.ok,
       'data': has_entries( {
         'completion_start_column': 26,
-        'completions': contains(
+        'completions': contains_exactly(
           CompletionEntryMatcher( 'testing.*;', None, {
             'menu_text': 'com.youcompleteme.testing',
             'kind': 'Module',
@@ -351,23 +359,24 @@ def GetCompletions_WithFixIt_test( app ):
       'data': has_entries( {
         'completion_start_column': 22,
         'completions': contains_inanyorder(
-          CompletionEntryMatcher( 'CUTHBERT', 'com.test.wobble.Wibble',
-          {
-            'kind': 'EnumMember',
-            'extra_data': has_entries( {
-              'fixits': contains( has_entries( {
-                'chunks': contains(
-                  ChunkMatcher( 'Wibble',
-                                LocationMatcher( filepath, 19, 15 ),
-                                LocationMatcher( filepath, 19, 21 ) ),
-                  # OK, so it inserts the import
-                  ChunkMatcher( '\n\nimport com.test.wobble.Wibble;\n\n',
-                                LocationMatcher( filepath, 1, 18 ),
-                                LocationMatcher( filepath, 3, 1 ) ),
-                ),
-              } ) ),
+          CompletionEntryMatcher( 'CUTHBERT',
+            'com.test.wobble.Wibble.CUTHBERT : Wibble',
+            {
+              'kind': 'EnumMember',
+              'extra_data': has_entries( {
+                'fixits': contains_exactly( has_entries( {
+                  'chunks': contains_exactly(
+                    ChunkMatcher( 'Wibble',
+                                  LocationMatcher( filepath, 19, 15 ),
+                                  LocationMatcher( filepath, 19, 21 ) ),
+                    # OK, so it inserts the import
+                    ChunkMatcher( '\n\nimport com.test.wobble.Wibble;\n\n',
+                                  LocationMatcher( filepath, 1, 18 ),
+                                  LocationMatcher( filepath, 3, 1 ) ),
+                  ),
+                } ) ),
+              } ),
             } ),
-          } ),
         ),
         'errors': empty(),
       } )
@@ -391,10 +400,12 @@ def GetCompletions_RejectMultiLineInsertion_test( app ):
       'response': requests.codes.ok,
       'data': has_entries( {
         'completion_start_column': 16,
-        'completions': contains(
-          CompletionEntryMatcher( 'TestLauncher', 'com.test.TestLauncher', {
-            'kind': 'Constructor'
-          } )
+        'completions': contains_exactly(
+          CompletionEntryMatcher( 'TestLauncher',
+            'com.test.TestLauncher.TestLauncher(int test)',
+            {
+              'kind': 'Constructor'
+            } )
           # Note: There would be a suggestion here for the _real_ thing we want,
           # which is a TestLauncher.Launchable, but this would generate the code
           # for an anonymous inner class via a completion TextEdit (not
@@ -426,19 +437,21 @@ def GetCompletions_UnicodeIdentifier_test( app ):
       'response': requests.codes.ok,
       'data': has_entries( {
         'completion_start_column': 35,
-        'completions': contains_inanyorder( *WithObjectMethods(
-          CompletionEntryMatcher( 'a_test', 'Test.TéstClass', {
+        'completions': has_items(
+          CompletionEntryMatcher( 'a_test', 'Test.TéstClass.a_test : int', {
             'kind': 'Field',
             'detailed_info': 'a_test : int\n\n',
           } ),
-          CompletionEntryMatcher( 'åtest', 'Test.TéstClass', {
+          CompletionEntryMatcher( 'åtest', 'Test.TéstClass.åtest : boolean', {
             'kind': 'Field',
             'detailed_info': 'åtest : boolean\n\n',
           } ),
-          CompletionEntryMatcher( 'testywesty', 'Test.TéstClass', {
-            'kind': 'Field',
-          } ),
-        ) ),
+          CompletionEntryMatcher( 'testywesty',
+                                  'Test.TéstClass.testywesty : String',
+                                  {
+                                    'kind': 'Field',
+                                  } ),
+        ),
         'errors': empty(),
       } )
     },
@@ -474,26 +487,28 @@ def GetCompletions_ResolveFailed_test( app ):
         'response': requests.codes.ok,
         'data': has_entries( {
           'completion_start_column': 35,
-          'completions': contains_inanyorder( *WithObjectMethods(
-            CompletionEntryMatcher( 'a_test', 'Test.TéstClass', {
+          'completions': has_items(
+            CompletionEntryMatcher( 'a_test', 'Test.TéstClass.a_test : int', {
               'kind': 'Field',
               'detailed_info': 'a_test : int\n\n',
             } ),
-            CompletionEntryMatcher( 'åtest', 'Test.TéstClass', {
+            CompletionEntryMatcher( 'åtest', 'Test.TéstClass.åtest : boolean', {
               'kind': 'Field',
               'detailed_info': 'åtest : boolean\n\n',
             } ),
-            CompletionEntryMatcher( 'testywesty', 'Test.TéstClass', {
-              'kind': 'Field',
-            } ),
-          ) ),
+            CompletionEntryMatcher( 'testywesty',
+                                    'Test.TéstClass.testywesty : String',
+                                    {
+                                      'kind': 'Field',
+                                    } ),
+          ),
           'errors': empty(),
         } )
       },
     } )
 
 
-@IsolatedYcmd
+@IsolatedYcmd()
 def GetCompletions_ServerNotInitialized_test( app ):
   filepath = PathToTestFile( 'simple_eclipse_project',
                              'src',
@@ -572,7 +587,7 @@ def GetCompletions_MoreThan100ForceSemantic_test( app ):
     'expect': {
       'response': requests.codes.ok,
       'data': has_entries( {
-        'completions': contains(
+        'completions': contains_exactly(
           CompletionEntryMatcher( 'com.youcompleteme.*;', None, {
             'kind': 'Module',
             'detailed_info': 'com.youcompleteme\n\n',
@@ -603,7 +618,7 @@ def GetCompletions_ForceAtTopLevel_NoImport_test( app ):
     'expect': {
       'response': requests.codes.ok,
       'data': has_entries( {
-        'completions': contains(
+        'completions': contains_exactly(
           CompletionEntryMatcher( 'TestFactory', None, {
             'kind': 'Class',
             'menu_text': 'TestFactory - com.test',
@@ -630,7 +645,7 @@ def GetCompletions_NoForceAtTopLevel_NoImport_test( app ):
     'expect': {
       'response': requests.codes.ok,
       'data': has_entries( {
-        'completions': contains(
+        'completions': contains_exactly(
           CompletionEntryMatcher( 'TestFactory', '[ID]', {} ),
         ),
         'completion_start_column': 12,
@@ -660,8 +675,8 @@ def GetCompletions_ForceAtTopLevel_WithImport_test( app ):
             'kind': 'Class',
             'menu_text': 'InputStreamReader - java.io',
             'extra_data': has_entries( {
-              'fixits': contains( has_entries( {
-                'chunks': contains(
+              'fixits': contains_exactly( has_entries( {
+                'chunks': contains_exactly(
                   ChunkMatcher( '\n\nimport java.io.InputStreamReader;\n\n',
                                 LocationMatcher( filepath, 1, 18 ),
                                 LocationMatcher( filepath, 3, 1 ) ),

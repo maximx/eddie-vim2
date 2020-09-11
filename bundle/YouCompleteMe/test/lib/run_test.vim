@@ -36,7 +36,8 @@
 let s:single_test_timeout = 60000
 
 " Restrict the runtimepath to the exact minimum needed for testing
-set rtp=$PWD/lib,$VIM/vimfiles,$VIMRUNTIME,$VIM/vimfiles/after
+let &rtp = getcwd() . '/lib'
+set rtp +=$VIM/vimfiles,$VIMRUNTIME,$VIM/vimfiles/after
 
 call ch_logfile( 'debuglog', 'w' )
 
@@ -145,15 +146,19 @@ func RunTheTest(test)
     let s:testid_filesafe = g:testpath . '_' . test_filesafe
 
     au VimLeavePre * call EarlyExit(s:test)
+    call ch_log( 'StartTest: ' . a:test )
     exe 'call ' . a:test
+    call ch_log( 'EndTest: ' . a:test )
     au! VimLeavePre
   catch /^\cskipped/
+    call ch_log( 'Skipped: ' . a:test )
     call add(s:messages, '    Skipped')
     call add(s:skipped,
           \ 'SKIPPED ' . a:test
           \ . ': '
           \ . substitute(v:exception, '^\S*\s\+', '',  ''))
   catch
+    call ch_log( 'Catch: ' . a:test )
     call add(v:errors,
           \ 'Caught exception in ' . a:test
           \ . ': '
@@ -293,7 +298,7 @@ func FinishTesting()
                 \ 'messages',
                 \ 's' )
 
-  if exists( '$COVERAGE' )
+  if exists( '$COVERAGE' ) && pyxeval( '_cov is not None' )
     pyx _cov.stop()
     pyx _cov.save()
   endif
@@ -343,7 +348,11 @@ endif
 
 pyx <<EOF
 def _InitCoverage():
-  import coverage
+  try:
+    import coverage
+  except ImportError:
+    return None
+
   cov = coverage.Coverage( data_file='.coverage.python' )
   cov.start()
   return cov

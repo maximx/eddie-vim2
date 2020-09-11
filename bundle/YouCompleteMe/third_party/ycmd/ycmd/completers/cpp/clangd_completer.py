@@ -1,4 +1,4 @@
-# Copyright (C) 2018-2019 ycmd contributors
+# Copyright (C) 2018-2020 ycmd contributors
 #
 # This file is part of ycmd.
 #
@@ -15,13 +15,6 @@
 # You should have received a copy of the GNU General Public License
 # along with ycmd.  If not, see <http://www.gnu.org/licenses/>.
 
-from __future__ import unicode_literals
-from __future__ import print_function
-from __future__ import division
-from __future__ import absolute_import
-# Not installing aliases from python-future; it's unreliable and slow.
-from builtins import *  # noqa
-
 import logging
 import os
 import subprocess
@@ -30,7 +23,6 @@ from ycmd import extra_conf_store, responses
 from ycmd.completers.cpp.flags import ( AddMacIncludePaths,
                                         RemoveUnusedFlags,
                                         ShouldAllowWinStyleFlags )
-from ycmd.completers.language_server import simple_language_server_completer
 from ycmd.completers.language_server import language_server_completer
 from ycmd.completers.language_server import language_server_protocol as lsp
 from ycmd.utils import ( CLANG_RESOURCE_DIR,
@@ -42,7 +34,7 @@ from ycmd.utils import ( CLANG_RESOURCE_DIR,
                          PathsToAllParentFolders,
                          re )
 
-MIN_SUPPORTED_VERSION = ( 9, 0, 0 )
+MIN_SUPPORTED_VERSION = ( 10, 0, 0 )
 INCLUDE_REGEX = re.compile(
   '(\\s*#\\s*(?:include|import)\\s*)(?:"[^"]*|<[^>]*)' )
 NOT_CACHED = 'NOT_CACHED'
@@ -172,7 +164,7 @@ def GetClangdCommand( user_options ):
 def ShouldEnableClangdCompleter( user_options ):
   """Checks whether clangd should be enabled or not.
 
-  - Returns True iff an up-to-date binary exists either in `clangd_binary_path`
+  - Returns True if an up-to-date binary exists either in `clangd_binary_path`
     or in third party folder and `use_clangd` is not set to `0`.
   """
   # User disabled clangd explicitly.
@@ -209,7 +201,7 @@ def BuildCompilationCommand( flags, filepath ):
   return flags + [ filepath ]
 
 
-class ClangdCompleter( simple_language_server_completer.SimpleLSPCompleter ):
+class ClangdCompleter( language_server_completer.LanguageServerCompleter ):
   """A LSP-based completer for C-family languages, powered by Clangd.
 
   Supported features:
@@ -219,7 +211,7 @@ class ClangdCompleter( simple_language_server_completer.SimpleLSPCompleter ):
   """
 
   def __init__( self, user_options ):
-    super( ClangdCompleter, self ).__init__( user_options )
+    super().__init__( user_options )
 
     self._clangd_command = GetClangdCommand( user_options )
     self._use_ycmd_caching = user_options[ 'clangd_uses_ycmd_caching' ]
@@ -231,9 +223,8 @@ class ClangdCompleter( simple_language_server_completer.SimpleLSPCompleter ):
 
 
   def _Reset( self ):
-    with self._server_state_mutex:
-      super( ClangdCompleter, self )._Reset()
-      self._compilation_commands = {}
+    super()._Reset()
+    self._compilation_commands = {}
 
 
   def GetCompleterName( self ):
@@ -258,15 +249,15 @@ class ClangdCompleter( simple_language_server_completer.SimpleLSPCompleter ):
 
   def GetType( self, request_data ):
     try:
-      # Clangd's hover response looks like this:
-      #     Declared in namespace <namespace name>
-      #
-      #     <declaration line>
-      #
-      #     <docstring>
-      # GetType gets the first two lines.
       hover_value = self.GetHoverResponse( request_data )[ 'value' ]
-      type_info = '\n\n'.join( hover_value.split( '\n\n', 2 )[ : 2 ] )
+      # Last "paragraph" contains the signature/declaration - i.e. type info.
+      type_info = hover_value.split( '\n\n' )[ -1 ]
+      # The first line might contain the info of enclosing scope.
+      if type_info.startswith( '// In' ):
+        comment, signature = type_info.split( '\n', 1 )
+        type_info = signature + '; ' + comment
+      # Condense multi-line function declarations into one line.
+      type_info = re.sub( r'\s+', ' ', type_info )
       return responses.BuildDisplayMessageResponse( type_info )
     except language_server_completer.NoHoverInfoException:
       raise RuntimeError( 'Unknown type.' )
@@ -322,8 +313,7 @@ class ClangdCompleter( simple_language_server_completer.SimpleLSPCompleter ):
 
   def ShouldUseNowInner( self, request_data ):
     return ( self.ServerIsReady() and
-             ( super( language_server_completer.LanguageServerCompleter,
-                      self ).ShouldUseNowInner( request_data ) or
+             ( super().ShouldUseNowInner( request_data ) or
                self.ShouldCompleteIncludeStatement( request_data ) ) )
 
 
@@ -333,20 +323,19 @@ class ClangdCompleter( simple_language_server_completer.SimpleLSPCompleter ):
     # Clangd should be able to provide completions in any context.
     # FIXME: Empty queries provide spammy results, fix this in Clangd.
     if self._use_ycmd_caching:
-      return super( ClangdCompleter, self ).ShouldUseNow( request_data )
+      return super().ShouldUseNow( request_data )
     return ( request_data[ 'query' ] != '' or
-             super( ClangdCompleter, self ).ShouldUseNowInner( request_data ) )
+             super().ShouldUseNowInner( request_data ) )
 
 
   def ComputeCandidates( self, request_data ):
     """Overridden to bypass ycmd cache if disabled."""
     # Caching results means resorting them, and ycmd has fewer signals.
     if self._use_ycmd_caching:
-      return super( ClangdCompleter, self ).ComputeCandidates( request_data )
+      return super().ComputeCandidates( request_data )
     codepoint = request_data[ 'column_codepoint' ]
-    candidates, _ = super( ClangdCompleter,
-                           self ).ComputeCandidatesInner( request_data,
-                                                          codepoint )
+    candidates, _ = super().ComputeCandidatesInner( request_data,
+                                                    codepoint )
     return candidates
 
 

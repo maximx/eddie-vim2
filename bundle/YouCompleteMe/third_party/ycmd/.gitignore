@@ -1,3 +1,7 @@
+# Editor temp files
+*.sw[a-z]
+*.un~
+
 # Compiled Object files
 *.slo
 *.lo
@@ -91,3 +95,6 @@ third_party/generic_server/package-lock.json
 
 # clangd index data
 .clangd/
+
+# installation directory for gopls
+third_party/go

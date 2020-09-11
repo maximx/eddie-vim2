@@ -1,4 +1,4 @@
-# Copyright (C) 2011-2019 ycmd contributors
+# Copyright (C) 2011-2020 ycmd contributors
 #
 # This file is part of ycmd.
 #
@@ -15,13 +15,6 @@
 # You should have received a copy of the GNU General Public License
 # along with ycmd.  If not, see <http://www.gnu.org/licenses/>.
 
-from __future__ import unicode_literals
-from __future__ import print_function
-from __future__ import division
-from __future__ import absolute_import
-# Not installing aliases from python-future; it's unreliable and slow.
-from builtins import *  # noqa
-
 from ycmd import extra_conf_store, responses
 from ycmd.completers.completer import Completer, SignatureHelpAvailalability
 from ycmd.utils import ( CodepointOffsetToByteOffset,
@@ -29,8 +22,9 @@ from ycmd.utils import ( CodepointOffsetToByteOffset,
                          FindExecutable,
                          LOGGER )
 
-import os
+import itertools
 import jedi
+import os
 import parso
 from threading import Lock
 
@@ -42,12 +36,12 @@ class PythonCompleter( Completer ):
   """
 
   def __init__( self, user_options ):
-    super( PythonCompleter, self ).__init__( user_options )
+    super().__init__( user_options )
     self._jedi_lock = Lock()
     self._settings_for_file = {}
     self._environment_for_file = {}
     self._environment_for_interpreter_path = {}
-    self._sys_path_for_file = {}
+    self._jedi_project_for_file = {}
     self.SetSignatureHelpTriggers( [ '(', ',' ] )
 
 
@@ -59,7 +53,7 @@ class PythonCompleter( Completer ):
     # This is implicitly loading the extra conf file and caching the Jedi
     # environment and Python path.
     environment = self._EnvironmentForRequest( request_data )
-    self._SysPathForFile( request_data, environment )
+    self._JediProjectForFile( request_data, environment )
 
 
   def _SettingsForRequest( self, request_data ):
@@ -129,7 +123,7 @@ class PythonCompleter( Completer ):
     return environment
 
 
-  def _GetSysPath( self, request_data, environment ):
+  def _GetJediProject( self, request_data, environment ):
     settings = {
       'sys_path': []
     }
@@ -142,38 +136,40 @@ class PythonCompleter( Completer ):
     # We don't warn the user if no extra conf file is found.
     if module:
       if hasattr( module, 'PythonSysPath' ):
-        return module.PythonSysPath( **settings )
+        settings[ 'sys_path' ] = module.PythonSysPath( **settings )
       LOGGER.debug( 'No PythonSysPath function defined in %s', module.__file__ )
-    return settings[ 'sys_path' ]
+
+    project_directory = settings.get( 'project_directory' )
+    if not project_directory:
+      default_project = jedi.get_default_project(
+        os.path.dirname( request_data[ 'filepath' ] ) )
+      project_directory = default_project._path
+    return jedi.Project( project_directory,
+                         sys_path = settings[ 'sys_path' ],
+                         environment_path = settings[ 'interpreter_path' ] )
 
 
-  def _SysPathForFile( self, request_data, environment ):
+  def _JediProjectForFile( self, request_data, environment ):
     filepath = request_data[ 'filepath' ]
     client_data = request_data[ 'extra_conf_data' ]
     try:
-      return self._sys_path_for_file[ filepath, client_data ]
+      return self._jedi_project_for_file[ filepath, client_data ]
     except KeyError:
       pass
 
-    sys_path = self._GetSysPath( request_data, environment )
-    self._sys_path_for_file[ filepath, client_data ] = sys_path
-    return sys_path
+    jedi_project = self._GetJediProject( request_data, environment )
+    self._jedi_project_for_file[ filepath, client_data ] = jedi_project
+    return jedi_project
 
 
   def _GetJediScript( self, request_data ):
     path = request_data[ 'filepath' ]
     source = request_data[ 'file_data' ][ path ][ 'contents' ]
-    line = request_data[ 'line_num' ]
-    # Jedi expects columns to start at 0, not 1, and for them to be Unicode
-    # codepoint offsets.
-    column = request_data[ 'start_codepoint' ] - 1
     environment = self._EnvironmentForRequest( request_data )
-    sys_path = self._SysPathForFile( request_data, environment )
+    jedi_project = self._JediProjectForFile( request_data, environment )
     return jedi.Script( source,
-                        line,
-                        column,
-                        path,
-                        sys_path = sys_path,
+                        path = path,
+                        project = jedi_project,
                         environment = environment )
 
 
@@ -192,9 +188,13 @@ class PythonCompleter( Completer ):
 
   def ComputeCandidatesInner( self, request_data ):
     with self._jedi_lock:
-      completions = self._GetJediScript( request_data ).completions()
+      line = request_data[ 'line_num' ]
+      # Jedi expects columns to start at 0, not 1, and for them to be Unicode
+      # codepoint offsets.
+      column = request_data[ 'start_codepoint' ] - 1
+      completions = self._GetJediScript( request_data ).complete( line, column )
       return [ responses.BuildCompletionData(
-        insertion_text = completion.name,
+        insertion_text = completion.complete,
         # We store the Completion object returned by Jedi in the extra_data
         # field to detail the candidates once the filtering is done.
         extra_data = completion
@@ -207,7 +207,12 @@ class PythonCompleter( Completer ):
 
   def ComputeSignaturesInner( self, request_data ):
     with self._jedi_lock:
-      signatures = self._GetJediScript( request_data ).call_signatures()
+      line = request_data[ 'line_num' ]
+      # Jedi expects columns to start at 0, not 1, and for them to be Unicode
+      # codepoint offsets.
+      column = request_data[ 'start_codepoint' ] - 1
+      signatures = self._GetJediScript( request_data ).get_signatures( line,
+                                                                       column )
       # Sorting by the number or arguments makes the order stable for the tests
       # and isn't harmful. The order returned by jedi seems to be arbitrary.
       signatures.sort( key=lambda s: len( s.params ) )
@@ -277,6 +282,10 @@ class PythonCompleter( Completer ):
                            self._GoToDefinition( request_data ) ),
       'GoToReferences' : ( lambda self, request_data, args:
                            self._GoToReferences( request_data ) ),
+      'GoToSymbol' : ( lambda self, request_data, args:
+                       self._GoToSymbol( request_data, args ) ),
+      'GoToType'       : ( lambda self, request_data, args:
+                           self._GoToType( request_data ) ),
       'GetType'        : ( lambda self, request_data, args:
                            self._GetType( request_data ) ),
       'GetDoc'         : ( lambda self, request_data, args:
@@ -284,36 +293,110 @@ class PythonCompleter( Completer ):
     }
 
 
-  def _BuildGoToResponse( self, definitions ):
+  def _BuildGoToResponse( self, definitions, request_data ):
     if len( definitions ) == 1:
       definition = definitions[ 0 ]
-      return responses.BuildGoToResponse( definition.module_path,
+      column = 1
+      if all( x is None for x in [ definition.column,
+                                   definition.line,
+                                   definition.module_path ] ):
+        return None
+      if definition.column is not None:
+        column += definition.column
+      filepath = definition.module_path or request_data[ 'filepath' ]
+      return responses.BuildGoToResponse( filepath,
                                           definition.line,
-                                          definition.column + 1 )
+                                          column )
 
     gotos = []
     for definition in definitions:
-      gotos.append( responses.BuildGoToResponse( definition.module_path,
+      column = 1
+      if all( x is None for x in [ definition.column,
+                                   definition.line,
+                                   definition.module_path ] ):
+        continue
+      if definition.column is not None:
+        column += definition.column
+      filepath = definition.module_path or request_data[ 'filepath' ]
+      gotos.append( responses.BuildGoToResponse( filepath,
                                                  definition.line,
-                                                 definition.column + 1,
+                                                 column,
                                                  definition.description ) )
     return gotos
 
 
+  def _GoToType( self, request_data ):
+    with self._jedi_lock:
+      line = request_data[ 'line_num' ]
+      # Jedi expects columns to start at 0, not 1, and for them to be Unicode
+      # codepoint offsets.
+      column = request_data[ 'start_codepoint' ] - 1
+      script = self._GetJediScript( request_data )
+      definitions = script.infer( line, column )
+      if definitions:
+        type_def = self._BuildGoToResponse( definitions, request_data )
+        if type_def is not None:
+          return type_def
+
+    raise RuntimeError( 'Can\'t jump to type definition.' )
+
+
   def _GoToDefinition( self, request_data ):
     with self._jedi_lock:
-      definitions = self._GetJediScript( request_data ).goto_definitions()
+      line = request_data[ 'line_num' ]
+      # Jedi expects columns to start at 0, not 1, and for them to be Unicode
+      # codepoint offsets.
+      column = request_data[ 'start_codepoint' ] - 1
+      script = self._GetJediScript( request_data )
+      definitions = script.goto( line, column )
       if definitions:
-        return self._BuildGoToResponse( definitions )
-    raise RuntimeError( 'Can\'t jump to type definition.' )
+        definitions = self._BuildGoToResponse( definitions, request_data )
+        if definitions is not None:
+          return definitions
+
+    raise RuntimeError( 'Can\'t jump to definition.' )
 
 
   def _GoToReferences( self, request_data ):
     with self._jedi_lock:
-      definitions = self._GetJediScript( request_data ).usages()
+      line = request_data[ 'line_num' ]
+      # Jedi expects columns to start at 0, not 1, and for them to be Unicode
+      # codepoint offsets.
+      column = request_data[ 'start_codepoint' ] - 1
+      definitions = self._GetJediScript( request_data ).get_references( line,
+                                                                        column )
       if definitions:
-        return self._BuildGoToResponse( definitions )
+        references = self._BuildGoToResponse( definitions, request_data )
+        if references is not None:
+          return references
     raise RuntimeError( 'Can\'t find references.' )
+
+
+  def _GoToSymbol( self, request_data, args ):
+    if len( args ) < 1:
+      raise RuntimeError( 'Must specify something to search for' )
+
+    query = args[ 0 ]
+
+    # Jedi docs say:
+    #   Searches a name in the whole project. If the project is very big, at
+    #   some point Jedi will stop searching. However it’s also very much
+    #   recommended to not exhaust the generator. Just display the first ten
+    #   results to the user.
+    MAX_RESULTS = 10
+
+    with self._jedi_lock:
+      environent = self._EnvironmentForRequest( request_data )
+      project = self._JediProjectForFile( request_data, environent )
+
+      definitions = list( itertools.islice( project.complete_search( query ),
+                                            MAX_RESULTS ) )
+      if definitions:
+        definitions = self._BuildGoToResponse( definitions, request_data )
+        if definitions is not None:
+          return definitions
+
+    raise RuntimeError( 'Symbol not found' )
 
 
   # This method must be called under Jedi's lock.
@@ -323,16 +406,21 @@ class PythonCompleter( Completer ):
     # from the params field.
     try:
       # Remove the "param " prefix from the description.
+      parameters = definition.get_signatures()[ 0 ].params
       type_info += '(' + ', '.join(
-        [ param.description[ 6: ] for param in definition.params ] ) + ')'
-    except AttributeError:
+        [ param.description[ 6: ] for param in parameters ] ) + ')'
+    except IndexError:
       pass
     return type_info
 
 
   def _GetType( self, request_data ):
     with self._jedi_lock:
-      definitions = self._GetJediScript( request_data ).goto_definitions()
+      line = request_data[ 'line_num' ]
+      # Jedi expects columns to start at 0, not 1, and for them to be Unicode
+      # codepoint offsets.
+      column = request_data[ 'start_codepoint' ] - 1
+      definitions = self._GetJediScript( request_data ).infer( line, column )
       type_info = [ self._BuildTypeInfo( definition )
                     for definition in definitions ]
     type_info = ', '.join( type_info )
@@ -343,9 +431,14 @@ class PythonCompleter( Completer ):
 
   def _GetDoc( self, request_data ):
     with self._jedi_lock:
-      definitions = self._GetJediScript( request_data ).goto_definitions()
-      documentation = [ definition.docstring() for definition in definitions ]
-    documentation = '\n---\n'.join( documentation )
+      line = request_data[ 'line_num' ]
+      # Jedi expects columns to start at 0, not 1, and for them to be Unicode
+      # codepoint offsets.
+      column = request_data[ 'start_codepoint' ] - 1
+      definitions = self._GetJediScript( request_data ).goto( line, column )
+      documentation = [
+        definition.docstring().strip() for definition in definitions ]
+    documentation = '\n---\n'.join( [ d for d in documentation if d ] )
     if documentation:
       return responses.BuildDetailedInfoResponse( documentation )
     raise RuntimeError( 'No documentation available.' )
@@ -358,9 +451,15 @@ class PythonCompleter( Completer ):
       key = 'Python interpreter',
       value = environment.executable )
 
+    python_root = responses.DebugInfoItem(
+      key = 'Python root',
+      value = str( self._JediProjectForFile( request_data,
+                                             environment )._path ) )
+
     python_path = responses.DebugInfoItem(
       key = 'Python path',
-      value = str( self._SysPathForFile( request_data, environment ) ) )
+      value = str( self._JediProjectForFile( request_data,
+                                             environment )._sys_path ) )
 
     python_version = responses.DebugInfoItem(
       key = 'Python version',
@@ -376,6 +475,7 @@ class PythonCompleter( Completer ):
 
     return responses.BuildDebugInfoResponse( name = 'Python',
                                              items = [ python_interpreter,
+                                                       python_root,
                                                        python_path,
                                                        python_version,
                                                        jedi_version,

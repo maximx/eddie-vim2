@@ -1,4 +1,4 @@
-# Copyright (C) 2015-2019 ycmd contributors
+# Copyright (C) 2015-2020 ycmd contributors
 #
 # This file is part of ycmd.
 #
@@ -15,24 +15,18 @@
 # You should have received a copy of the GNU General Public License
 # along with ycmd.  If not, see <http://www.gnu.org/licenses/>.
 
-from __future__ import absolute_import
-from __future__ import unicode_literals
-from __future__ import print_function
-from __future__ import division
-# Not installing aliases from python-future; it's unreliable and slow.
-from builtins import *  # noqa
-
 from hamcrest import ( assert_that,
-                       contains,
+                       contains_exactly,
                        contains_inanyorder,
                        empty,
                        equal_to,
                        has_entries,
                        has_entry,
                        matches_regexp )
-from mock import patch
+from unittest.mock import patch
 from pprint import pformat
 import os
+import pytest
 import requests
 
 from ycmd import handlers
@@ -95,7 +89,6 @@ def RunTest( app, test, contents = None ):
   assert_that( response.json, test[ 'expect' ][ 'data' ] )
 
 
-@SharedYcmd
 def RunFixItTest( app, description, filepath, line, col, fixits_for_line ):
   RunTest( app, {
     'description': description,
@@ -125,17 +118,20 @@ def Subcommands_DefinedSubcommands_test( app ):
                                     'GoToDeclaration',
                                     'GoToDefinition',
                                     'GoToReferences',
+                                    'GoToImplementation',
                                     'GoToType',
+                                    'GoToSymbol',
                                     'FixIt',
-                                    'RestartServer' ) )
+                                    'RestartServer',
+                                    'ExecuteCommand' ) )
 
 
-def Subcommands_ServerNotInitialized_test():
+@SharedYcmd
+def Subcommands_ServerNotInitialized_test( app ):
   filepath = PathToTestFile( 'goto.go' )
 
   completer = handlers._server_state.GetFiletypeCompleter( [ 'go' ] )
 
-  @SharedYcmd
   @patch.object( completer, '_ServerIsInitialized', return_value = False )
   def Test( app, cmd, arguments, *args ):
     RunTest( app, {
@@ -154,14 +150,14 @@ def Subcommands_ServerNotInitialized_test():
       }
     } )
 
-  yield Test, 'Format', []
-  yield Test, 'GetDoc', []
-  yield Test, 'GetType', []
-  yield Test, 'GoTo', []
-  yield Test, 'GoToDeclaration', []
-  yield Test, 'GoToDefinition', []
-  yield Test, 'GoToType', []
-  yield Test, 'FixIt', []
+  Test( app, 'Format', [] )
+  Test( app, 'GetDoc', [] )
+  Test( app, 'GetType', [] )
+  Test( app, 'GoTo', [] )
+  Test( app, 'GoToDeclaration', [] )
+  Test( app, 'GoToDefinition', [] )
+  Test( app, 'GoToType', [] )
+  Test( app, 'FixIt', [] )
 
 
 @SharedYcmd
@@ -188,8 +184,8 @@ def Subcommands_Format_WholeFile_test( app ):
     'expect': {
       'response': requests.codes.ok,
       'data': has_entries( {
-        'fixits': contains( has_entries( {
-          'chunks': contains(
+        'fixits': contains_exactly( has_entries( {
+          'chunks': contains_exactly(
             ChunkMatcher( '',
                           LocationMatcher( filepath, 8, 1 ),
                           LocationMatcher( filepath, 9, 1 ) ),
@@ -241,8 +237,8 @@ def Subcommands_Format_Range_test( app ):
     'expect': {
       'response': requests.codes.ok,
       'data': has_entries( {
-        'fixits': contains( has_entries( {
-          'chunks': contains(
+        'fixits': contains_exactly( has_entries( {
+          'chunks': contains_exactly(
             ChunkMatcher( 'fn unformatted_function(param: bool) -> bool {\n'
                           '\treturn param;\n'
                           '}\n'
@@ -330,7 +326,6 @@ def Subcommands_GetType_Function_test( app ):
   } )
 
 
-@SharedYcmd
 def RunGoToTest( app, command, test ):
   folder = PathToTestFile()
   filepath = PathToTestFile( test[ 'req' ][ 0 ] )
@@ -347,7 +342,7 @@ def RunGoToTest( app, command, test ):
 
     expect = {
       'response': requests.codes.ok,
-      'data': contains( *[
+      'data': contains_exactly( *[
         LocationMatcher(
           os.path.join( folder, location[ 0 ] ),
           location[ 1 ],
@@ -376,38 +371,77 @@ def RunGoToTest( app, command, test ):
   } )
 
 
-def Subcommands_GoTo_test():
-  unicode_go_path = os.path.join( 'unicode', 'unicode.go' )
-  tests = [
+@pytest.mark.parametrize( 'command', [ 'GoToDeclaration',
+                                       'GoToDefinition',
+                                       'GoTo' ] )
+@pytest.mark.parametrize( 'test', [
     # Struct
-    { 'req': ( unicode_go_path, 13, 5 ), 'res': ( unicode_go_path, 10, 5 ) },
+    { 'req': ( os.path.join( 'unicode', 'unicode.go' ), 13, 5 ),
+      'res': ( os.path.join( 'unicode', 'unicode.go' ), 10, 5 ) },
     # Function
     { 'req': ( 'goto.go', 8, 5 ), 'res': ( 'goto.go', 3, 6 ) },
     # Keyword
     { 'req': ( 'goto.go', 3, 2 ), 'res': 'Cannot jump to location' },
-  ]
+  ] )
+@SharedYcmd
+def Subcommands_GoTo_test( app, command, test ):
+  RunGoToTest( app, command, test )
 
-  for test in tests:
-    for command in [ 'GoToDeclaration', 'GoToDefinition', 'GoTo' ]:
-      yield RunGoToTest, command, test
 
-
-def Subcommands_GoToType_test():
-  unicode_go_path = os.path.join( 'unicode', 'unicode.go' )
-  tests = [
+@pytest.mark.parametrize( 'test', [
     # Works
-    { 'req': ( unicode_go_path, 13, 5 ), 'res': ( unicode_go_path, 3, 6 ) },
+    { 'req': ( os.path.join( 'unicode', 'unicode.go' ), 13, 5 ),
+      'res': ( os.path.join( 'unicode', 'unicode.go' ), 3, 6 ) },
     # Fails
-    { 'req': ( unicode_go_path, 11, 7 ), 'res': 'Cannot jump to location' } ]
-  for test in tests:
-    yield RunGoToTest, 'GoToType', test
+    { 'req': ( os.path.join( 'unicode', 'unicode.go' ), 11, 7 ),
+      'res': 'Cannot jump to location' } ] )
+@SharedYcmd
+def Subcommands_GoToType_test( app, test ):
+  RunGoToTest( app, 'GoToType', test )
 
 
-def Subcommands_FixIt_NullResponse_test():
+@pytest.mark.parametrize( 'test', [
+    # Works
+    { 'req': ( 'thing.go', 3, 8 ),
+      'res': ( 'thing.go', 7, 6 ) },
+    # Fails
+    { 'req': ( 'thing.go', 12, 7 ),
+      'res': 'Cannot jump to location' } ] )
+@SharedYcmd
+def Subcommands_GoToImplementation_test( app, test ):
+  RunGoToTest( app, 'GoToImplementation', test )
+
+
+@ExpectedFailure( 'Gopls bug - golang/go#37702',
+                  matches_regexp( '.*No item matched.*' ) )
+@SharedYcmd
+def Subcommands_FixIt_FixItWorksAtEndOfFile_test( app ):
+  filepath = PathToTestFile( 'fixit_goplsbug.go' )
+  fixit = has_entries( {
+    'fixits': contains_exactly(
+      has_entries( {
+        'text': "Organize Imports",
+        'chunks': contains_exactly(
+          ChunkMatcher( '',
+                        LocationMatcher( filepath, 1, 1 ),
+                        LocationMatcher( filepath, 3, 1 ) ),
+          ChunkMatcher( 'package main',
+                        LocationMatcher( filepath, 3, 1 ),
+                        LocationMatcher( filepath, 3, 1 ) ),
+        ),
+        'kind': 'source.organizeImports',
+      } ),
+    )
+  } )
+  RunFixItTest( app, 'Only one fixit returned', filepath, 1, 1, fixit )
+
+
+@SharedYcmd
+def Subcommands_FixIt_NullResponse_test( app ):
   filepath = PathToTestFile( 'td', 'test.go' )
-  yield ( RunFixItTest, 'Gopls returned NULL for response[ \'result\' ]',
-      filepath, 1, 1, has_entry( 'fixits', contains(
-        has_entries( { 'text': "Organize Imports", 'chunks': empty() } ) ) ) )
+  RunFixItTest( app,
+                'Gopls returned NULL for response[ \'result\' ]',
+                filepath, 1, 1, has_entry( 'fixits', empty() ) )
 
 
 @SharedYcmd
@@ -428,31 +462,26 @@ def Subcommands_FixIt_ParseError_test( app ):
   } )
 
 
-def Subcommands_FixIt_Simple_test():
-  filepath = PathToTestFile( 'goto.go' )
+@SharedYcmd
+def Subcommands_FixIt_Simple_test( app ):
+  filepath = PathToTestFile( 'fixit.go' )
   fixit = has_entries( {
-    'fixits': contains(
+    'fixits': contains_exactly(
       has_entries( {
         'text': "Organize Imports",
-        'chunks': contains(
+        'chunks': contains_exactly(
           ChunkMatcher( '',
-                        LocationMatcher( filepath, 8, 1 ),
-                        LocationMatcher( filepath, 9, 1 ) ),
-          ChunkMatcher( '\tdummy() //GoTo\n',
-                        LocationMatcher( filepath, 9, 1 ),
-                        LocationMatcher( filepath, 9, 1 ) ),
-          ChunkMatcher( '',
-                        LocationMatcher( filepath, 12, 1 ),
-                        LocationMatcher( filepath, 13, 1 ) ),
-          ChunkMatcher( '\tdiagnostics_test\n',
-                        LocationMatcher( filepath, 13, 1 ),
-                        LocationMatcher( filepath, 13, 1 ) ),
+                        LocationMatcher( filepath, 2, 1 ),
+                        LocationMatcher( filepath, 3, 1 ) ),
+          ChunkMatcher( '\n',
+                        LocationMatcher( filepath, 3, 1 ),
+                        LocationMatcher( filepath, 3, 1 ) ),
         ),
+        'kind': 'source.organizeImports',
       } ),
     )
   } )
-  yield ( RunFixItTest, 'Only one fixit returned',
-          filepath, 1, 1, fixit )
+  RunFixItTest( app, 'Only one fixit returned', filepath, 1, 1, fixit )
 
 
 @SharedYcmd
@@ -470,9 +499,9 @@ def Subcommands_RefactorRename_test( app ):
     'expect': {
       'response': requests.codes.ok,
       'data': has_entries( {
-        'fixits': contains( has_entries( {
+        'fixits': contains_exactly( has_entries( {
           'text': '',
-          'chunks': contains(
+          'chunks': contains_exactly(
             ChunkMatcher( 'xxx',
                           LocationMatcher( filepath, 3, 6 ),
                           LocationMatcher( filepath, 3, 10 ) ),
@@ -486,8 +515,9 @@ def Subcommands_RefactorRename_test( app ):
   } )
 
 
-def Subcommands_GoToReferences_test():
+@SharedYcmd
+def Subcommands_GoToReferences_test( app ):
   filepath = os.path.join( 'unicode', 'unicode.go' )
   test = { 'req': ( filepath, 10, 5 ), 'res': [ ( filepath, 10, 5 ),
                                                 ( filepath, 13, 5 ) ] }
-  yield RunGoToTest, 'GoToReferences', test
+  RunGoToTest( app, 'GoToReferences', test )

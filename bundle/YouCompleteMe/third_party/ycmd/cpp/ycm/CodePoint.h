@@ -25,7 +25,7 @@
 namespace YouCompleteMe {
 
 // See
-// http://www.unicode.org/reports/tr29/#Grapheme_Cluster_Break_Property_Values
+// http://www.unicode.org/reports/tr29/tr29-37.html#Grapheme_Cluster_Break_Property_Values
 // NOTE: The properties must take the same value as the ones defined in the
 // update_unicode.py script.
 enum class BreakProperty : uint8_t {
@@ -80,7 +80,7 @@ struct RawCodePoint {
 //  - its breaking property: used to split a word into characters.
 //  - its combining class: used to sort a sequence of code points according to
 //    the Canonical Ordering algorithm (see
-//    https://www.unicode.org/versions/Unicode10.0.0/ch03.pdf#G49591).
+//    https://www.unicode.org/versions/Unicode13.0.0/ch03.pdf#G49591).
 class CodePoint {
 public:
   YCM_EXPORT explicit CodePoint( const std::string &code_point );
@@ -124,7 +124,7 @@ public:
 
   inline bool operator< ( const CodePoint &other ) const {
     return combining_class_ < other.combining_class_;
-  };
+  }
 
 private:
   explicit CodePoint( RawCodePoint&& code_point );
@@ -149,9 +149,8 @@ YCM_EXPORT CodePointSequence BreakIntoCodePoints( const std::string &text );
 
 // Thrown when an error occurs while decoding a UTF-8 string.
 struct YCM_EXPORT UnicodeDecodeError : std::runtime_error {
-  explicit UnicodeDecodeError( const char *what_arg )
-    : std::runtime_error( what_arg ) {
-  }
+  using std::runtime_error::runtime_error;
+  const char* what() const noexcept override;
 };
 
 } // namespace YouCompleteMe

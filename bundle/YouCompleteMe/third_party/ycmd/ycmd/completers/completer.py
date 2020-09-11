@@ -1,4 +1,4 @@
-# Copyright (C) 2011-2018 ycmd contributors
+# Copyright (C) 2011-2020 ycmd contributors
 #
 # This file is part of ycmd.
 #
@@ -15,18 +15,12 @@
 # You should have received a copy of the GNU General Public License
 # along with ycmd.  If not, see <http://www.gnu.org/licenses/>.
 
-from __future__ import unicode_literals
-from __future__ import print_function
-from __future__ import division
-from __future__ import absolute_import
-# Not installing aliases from python-future; it's unreliable and slow.
-from builtins import *  # noqa
-
 import abc
 import threading
+from ycmd import extra_conf_store
 from ycmd.completers import completer_utils
 from ycmd.responses import NoDiagnosticSupport, SignatureHelpAvailalability
-from future.utils import with_metaclass
+from ycmd.utils import LOGGER
 
 NO_USER_COMMANDS = 'This completer does not define any commands.'
 
@@ -34,7 +28,7 @@ NO_USER_COMMANDS = 'This completer does not define any commands.'
 MESSAGE_POLL_TIMEOUT = 10
 
 
-class Completer( with_metaclass( abc.ABCMeta, object ) ):
+class Completer( metaclass = abc.ABCMeta ):
   """A base class for all Completers in YCM.
 
   Here's several important things you need to know if you're writing a custom
@@ -127,6 +121,10 @@ class Completer( with_metaclass( abc.ABCMeta, object ) ):
   fields in DetailCandidates() which is called after the filtering is done. See
   python_completer.py for an example.
 
+  If the completer wants to use extra confs, it should implement Language()
+  function as well, which returns a string that identifies the language in
+  user's .ycmd_extra_conf.py file.
+
   You also need to implement the SupportedFiletypes() function which should
   return a list of strings, where the strings are Vim filetypes your completer
   supports.
@@ -146,7 +144,7 @@ class Completer( with_metaclass( abc.ABCMeta, object ) ):
   Do not override this function. Instead, you need to implement the
   GetSubcommandsMap method. It should return a map between the user commands
   and the methods of your completer. See the documentation of this method for
-  more informations on how to implement it.
+  more information on how to implement it.
 
   Override the Shutdown() member function if your Completer subclass needs to do
   custom cleanup logic on server shutdown.
@@ -392,6 +390,10 @@ class Completer( with_metaclass( abc.ABCMeta, object ) ):
     pass # pragma: no cover
 
 
+  def OnFileSave( self, request_data ):
+    pass # pragma: no cover
+
+
   def OnBufferVisit( self, request_data ):
     pass # pragma: no cover
 
@@ -401,6 +403,10 @@ class Completer( with_metaclass( abc.ABCMeta, object ) ):
 
 
   def OnInsertLeave( self, request_data ):
+    pass # pragma: no cover
+
+
+  def Langauge( self ):
     pass # pragma: no cover
 
 
@@ -479,28 +485,63 @@ class Completer( with_metaclass( abc.ABCMeta, object ) ):
     return False
 
 
-class CompletionsCache( object ):
+  def AdditionalFormattingOptions( self, request_data ):
+    module = extra_conf_store.ModuleForSourceFile( request_data[ 'filepath' ] )
+    try:
+      settings = self.GetSettings( module, request_data )
+      return settings.get( 'formatting_options', {} )
+    except AttributeError:
+      return {}
+
+
+  def GetSettings( self, module, request_data ):
+    if hasattr( module, 'Settings' ):
+      settings = module.Settings(
+        filename = request_data[ 'filepath' ],
+        language = self.Language(),
+        client_data = request_data[ 'extra_conf_data' ] )
+      if settings is not None:
+        return settings
+
+    LOGGER.debug( 'No Settings function defined in %s', module.__file__ )
+
+    return {}
+
+
+class CompletionsCache:
   """Cache of computed completions for a particular request."""
 
   def __init__( self ):
-    self._access_lock = threading.RLock()
+    self._access_lock = threading.Lock()
     self.Invalidate()
 
 
   def Invalidate( self ):
     with self._access_lock:
-      self._request_data = None
-      self._completions = None
+      self.InvalidateNoLock()
+
+
+  def InvalidateNoLock( self ):
+    self._request_data = None
+    self._completions = None
 
 
   def Update( self, request_data, completions ):
     with self._access_lock:
-      self._request_data = request_data
-      self._completions = completions
+      self.UpdateNoLock( request_data, completions )
+
+
+  def UpdateNoLock( self, request_data, completions ):
+    self._request_data = request_data
+    self._completions = completions
 
 
   def GetCompletionsIfCacheValid( self, request_data ):
     with self._access_lock:
-      if self._request_data and self._request_data == request_data:
-        return self._completions
-      return None
+      return self.GetCompletionsIfCacheValidNoLock( request_data )
+
+
+  def GetCompletionsIfCacheValidNoLock( self, request_data ):
+    if self._request_data and self._request_data == request_data:
+      return self._completions
+    return None

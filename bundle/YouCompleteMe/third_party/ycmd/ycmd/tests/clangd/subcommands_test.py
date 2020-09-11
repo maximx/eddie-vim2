@@ -23,15 +23,16 @@ from __future__ import print_function
 from __future__ import division
 
 from hamcrest import ( assert_that,
-                       contains,
+                       contains_exactly,
                        contains_string,
                        equal_to,
                        has_entries,
                        has_entry,
                        matches_regexp )
-from mock import patch
+from unittest.mock import patch
 from pprint import pprint
 import requests
+import pytest
 import os.path
 
 from ycmd import handlers
@@ -65,31 +66,47 @@ def Subcommands_DefinedSubcommands_test( app ):
       },
       'expect': {
         'response': requests.codes.ok,
-        'data': contains( *sorted( [ 'ExecuteCommand',
-                                     'FixIt',
-                                     'Format',
-                                     'GetDoc',
-                                     'GetDocImprecise',
-                                     'GetType',
-                                     'GetTypeImprecise',
-                                     'GoTo',
-                                     'GoToDeclaration',
-                                     'GoToDefinition',
-                                     'GoToImprecise',
-                                     'GoToInclude',
-                                     'GoToReferences',
-                                     'RefactorRename',
-                                     'RestartServer' ] ) )
+        'data': contains_exactly( *sorted( [ 'ExecuteCommand',
+                                             'FixIt',
+                                             'Format',
+                                             'GetDoc',
+                                             'GetDocImprecise',
+                                             'GetType',
+                                             'GetTypeImprecise',
+                                             'GoTo',
+                                             'GoToDeclaration',
+                                             'GoToDefinition',
+                                             'GoToImprecise',
+                                             'GoToInclude',
+                                             'GoToReferences',
+                                             'GoToSymbol',
+                                             'RefactorRename',
+                                             'RestartServer' ] ) )
       },
       'route': '/defined_subcommands',
   } )
 
 
-def Subcommands_ServerNotInitialized_test():
+@WithRetry
+@SharedYcmd
+@pytest.mark.parametrize( 'cmd', [
+  'FixIt',
+  'Format',
+  'GetDoc',
+  'GetDocImprecise',
+  'GetType',
+  'GetTypeImprecise',
+  'GoTo',
+  'GoToDeclaration',
+  'GoToDefinition',
+  'GoToInclude',
+  'GoToReferences',
+  'RefactorRename',
+] )
+def Subcommands_ServerNotInitialized_test( app, cmd ):
 
   completer = handlers._server_state.GetFiletypeCompleter( [ 'cpp' ] )
 
-  @SharedYcmd
   @patch.object( completer, '_ServerIsInitialized', return_value = False )
   def Test( app, cmd, *args ):
     request = {
@@ -112,18 +129,7 @@ def Subcommands_ServerNotInitialized_test():
                  ErrorMatcher( RuntimeError,
                                'Server is initializing. Please wait.' ) )
 
-  yield Test, 'FixIt'
-  yield Test, 'Format'
-  yield Test, 'GetDoc'
-  yield Test, 'GetDocImprecise'
-  yield Test, 'GetType'
-  yield Test, 'GetTypeImprecise'
-  yield Test, 'GoTo'
-  yield Test, 'GoToDeclaration'
-  yield Test, 'GoToDefinition'
-  yield Test, 'GoToInclude'
-  yield Test, 'GoToReferences'
-  yield Test, 'RefactorRename'
+  Test( app, cmd )
 
 
 @SharedYcmd
@@ -151,29 +157,25 @@ def Subcommands_GoTo_ZeroBasedLineAndColumn_test( app ):
   } )
 
 
-@SharedYcmd
 def RunGoToTest_all( app, folder, command, test ):
-  filepath = PathToTestFile( folder, test[ 'req' ][ 0 ] )
-  common_request = {
+  req = test[ 'req' ]
+  filepath = PathToTestFile( folder, req[ 0 ] )
+  request = {
     'completer_target' : 'filetype_default',
     'filepath'         : filepath,
-    'command_arguments': [ command ],
     'contents'         : ReadFile( filepath ),
-    'filetype'         : 'cpp'
+    'filetype'         : 'cpp',
+    'line_num'         : req[ 1 ],
+    'column_num'       : req[ 2 ],
+    'command_arguments': [ command ] + ( [] if len( req ) < 4 else req[ 3 ] ),
   }
-
-  request = common_request
-  request.update( {
-    'line_num'  : test[ 'req' ][ 1 ],
-    'column_num': test[ 'req' ][ 2 ],
-  } )
 
   response = test[ 'res' ]
 
   if isinstance( response, list ):
     expect = {
       'response': requests.codes.ok,
-      'data': contains( *[
+      'data': contains_exactly( *[
         LocationMatcher(
           PathToTestFile( folder, os.path.normpath( location[ 0 ] ) ),
           location[ 1 ],
@@ -203,8 +205,7 @@ def RunGoToTest_all( app, folder, command, test ):
   } )
 
 
-def Subcommands_GoTo_all_test():
-  tests = [
+@pytest.mark.parametrize( 'test', [
     # Local::x -> definition/declaration of x
     { 'req': ( 'goto.cc', 23, 21 ), 'res': ( 'goto.cc', 4, 9 ) },
     # Local::in_line -> definition/declaration of Local::in_line
@@ -228,15 +229,14 @@ def Subcommands_GoTo_all_test():
     # Expected failures
     { 'req': ( 'goto.cc', 13,  1 ), 'res': 'Cannot jump to location' },
     { 'req': ( 'goto.cc', 16,  6 ), 'res': 'Cannot jump to location' },
-  ]
+  ] )
+@pytest.mark.parametrize( 'cmd', [ 'GoToImprecise', 'GoToDefinition', 'GoTo' ] )
+@SharedYcmd
+def Subcommands_GoTo_all_test( app, cmd, test ):
+  RunGoToTest_all( app, '', cmd, test )
 
-  for test in tests:
-    for cmd in [ 'GoToDefinition', 'GoTo', 'GoToImprecise' ]:
-      yield RunGoToTest_all, '', cmd, test
 
-
-def Subcommands_GoToDeclaration_all_test():
-  tests = [
+@pytest.mark.parametrize( 'test', [
     # Local::x -> definition/declaration of x
     { 'req': ( 'goto.cc', 23, 21 ), 'res': ( 'goto.cc', 4, 9 ) },
     # Local::in_line -> definition/declaration of Local::in_line
@@ -260,14 +260,13 @@ def Subcommands_GoToDeclaration_all_test():
     # Expected failures
     { 'req': ( 'goto.cc', 13,  1 ), 'res': 'Cannot jump to location' },
     { 'req': ( 'goto.cc', 16,  6 ), 'res': 'Cannot jump to location' },
-  ]
+  ] )
+@SharedYcmd
+def Subcommands_GoToDeclaration_all_test( app, test ):
+  RunGoToTest_all( app, '', 'GoToDeclaration', test )
 
-  for test in tests:
-    yield RunGoToTest_all, '', 'GoToDeclaration', test
 
-
-def Subcommands_GoToInclude_test():
-  tests = [
+@pytest.mark.parametrize( 'test', [
     { 'req': ( 'main.cpp',  1,  6 ), 'res': ( 'a.hpp',        1, 1 ) },
     { 'req': ( 'main.cpp',  2, 14 ), 'res': ( 'system/a.hpp', 1, 1 ) },
     { 'req': ( 'main.cpp',  3,  1 ), 'res': ( 'quote/b.hpp',  1, 1 ) },
@@ -279,15 +278,14 @@ def Subcommands_GoToInclude_test():
     # Expected failures
     { 'req': ( 'main.cpp',  7,  1 ), 'res': 'Cannot jump to location' },
     { 'req': ( 'main.cpp', 10, 13 ), 'res': 'Cannot jump to location' },
-  ]
+  ] )
+@pytest.mark.parametrize( 'cmd', [ 'GoToImprecise', 'GoToInclude', 'GoTo' ] )
+@SharedYcmd
+def Subcommands_GoToInclude_test( app, cmd, test ):
+  RunGoToTest_all( app, 'test-include', cmd, test )
 
-  for test in tests:
-    for cmd in [ 'GoToInclude', 'GoTo', 'GoToImprecise' ]:
-      yield RunGoToTest_all, 'test-include', cmd, test
 
-
-def Subcommands_GoToReferences_test():
-  tests = [
+@pytest.mark.parametrize( 'test', [
     # Function
     { 'req': ( 'goto.cc', 14, 21 ), 'res': [ ( 'goto.cc', 11, 10 ),
                                              ( 'goto.cc', 14, 13 ),
@@ -300,13 +298,31 @@ def Subcommands_GoToReferences_test():
                                              ( 'goto.cc', 25, 15 ) ] },
     # Expected failure
     { 'req': ( 'goto.cc', 27,  8 ), 'res': 'Cannot jump to location' },
-  ]
-
-  for test in tests:
-    yield RunGoToTest_all, '', 'GoToReferences', test
-
-
+  ] )
 @SharedYcmd
+def Subcommands_GoToReferences_test( app, test ):
+  RunGoToTest_all( app, '', 'GoToReferences', test )
+
+
+@pytest.mark.parametrize( 'test', [
+  # In same file - 1 result
+  { 'req': ( 'goto.cc', 1, 1, [ 'out_of_line' ] ),
+    'res': ( 'goto.cc', 14, 13 ) },
+  # In same file - multiple results
+  { 'req': ( 'goto.cc', 1, 1, [ 'line' ] ),
+    'res': [ ( 'goto.cc', 6, 10 ), ( 'goto.cc', 14, 13 ) ] },
+  # None
+  { 'req': ( 'goto.cc', 1, 1, [ '' ] ), 'res': 'Symbol not found' },
+
+  # Note we don't actually have any testdata that has a full index, so we can't
+  # test multiple files easily, but that's really a clangd thing, not a ycmd
+  # thing.
+] )
+@SharedYcmd
+def Subcommands_GoToSymbol_test( app, test ):
+  RunGoToTest_all( app, '', 'GoToSymbol', test )
+
+
 def RunGetSemanticTest( app,
                         filepath,
                         filetype,
@@ -333,25 +349,24 @@ def RunGetSemanticTest( app,
   RunAfterInitialized( app, test )
 
 
-def Subcommands_GetType_test():
-  tests = [
+@pytest.mark.parametrize( 'test', [
     # Basic pod types
     [ { 'line_num': 24, 'column_num':  3 },
-      has_entry( 'message', contains_string( 'Foo' ) ),
+      has_entry( 'message', equal_to( 'struct Foo {}' ) ),
       requests.codes.ok ],
     # [ { 'line_num': 12, 'column_num':  2 }, 'Foo',
     [ { 'line_num': 12, 'column_num':  8 },
-      has_entry( 'message', contains_string( 'Foo' ) ),
+      has_entry( 'message', equal_to( 'struct Foo {}' ) ),
       requests.codes.ok ],
     [ { 'line_num': 12, 'column_num':  9 },
-      has_entry( 'message', contains_string( 'Foo' ) ),
+      has_entry( 'message', equal_to( 'struct Foo {}' ) ),
       requests.codes.ok ],
     [ { 'line_num': 12, 'column_num': 10 },
-      has_entry( 'message', contains_string( 'Foo' ) ),
+      has_entry( 'message', equal_to( 'struct Foo {}' ) ),
       requests.codes.ok ],
     # [ { 'line_num': 13, 'column_num':  3 }, 'int',
     [ { 'line_num': 13, 'column_num':  7 },
-      has_entry( 'message', contains_string( 'int' ) ),
+      has_entry( 'message', equal_to( 'int x; // In Foo' ) ),
       requests.codes.ok ],
     # [ { 'line_num': 15, 'column_num':  7 }, 'char' ],
 
@@ -373,64 +388,64 @@ def Subcommands_GetType_test():
 
     # Cursor on decl for refs & pointers
     [ { 'line_num': 39, 'column_num':  3 },
-      has_entry( 'message', contains_string( 'Foo' ) ),
+      has_entry( 'message', equal_to( 'struct Foo {}' ) ),
       requests.codes.ok ],
     [ { 'line_num': 39, 'column_num': 11 },
-      has_entry( 'message', contains_string( 'Foo &' ) ),
+      has_entry( 'message', equal_to( 'Foo &rFoo = foo; // In main' ) ),
       requests.codes.ok ],
     [ { 'line_num': 39, 'column_num': 15 },
-      has_entry( 'message', contains_string( 'Foo' ) ),
+      has_entry( 'message', equal_to( 'Foo foo; // In main' ) ),
       requests.codes.ok ],
     [ { 'line_num': 40, 'column_num':  3 },
-      has_entry( 'message', contains_string( 'Foo' ) ),
+      has_entry( 'message', equal_to( 'struct Foo {}' ) ),
       requests.codes.ok ],
     [ { 'line_num': 40, 'column_num': 11 },
-      has_entry( 'message', contains_string( 'Foo *' ) ),
+      has_entry( 'message', equal_to( 'Foo *pFoo = &foo; // In main' ) ),
       requests.codes.ok ],
     [ { 'line_num': 40, 'column_num': 18 },
-      has_entry( 'message', contains_string( 'Foo' ) ),
+      has_entry( 'message', equal_to( 'Foo foo; // In main' ) ),
       requests.codes.ok ],
     # [ { 'line_num': 42, 'column_num':  3 }, 'const Foo &' ],
     [ { 'line_num': 42, 'column_num': 16 },
-      has_entry( 'message', contains_string( 'const struct Foo &' ) ),
+      has_entry( 'message', equal_to( 'const Foo &crFoo = foo; // In main' ) ),
       requests.codes.ok ],
     # [ { 'line_num': 43, 'column_num':  3 }, 'const Foo *' ],
     [ { 'line_num': 43, 'column_num': 16 },
-      has_entry( 'message', contains_string( 'const struct Foo *' ) ),
+      has_entry( 'message', equal_to( 'const Foo *cpFoo = &foo; // In main' ) ),
       requests.codes.ok ],
 
     # Cursor on usage
     [ { 'line_num': 45, 'column_num': 13 },
-      has_entry( 'message', contains_string( 'const struct Foo' ) ),
+      has_entry( 'message', equal_to( 'const Foo &crFoo = foo; // In main' ) ),
       requests.codes.ok ],
     # [ { 'line_num': 45, 'column_num': 19 }, 'const int' ],
     [ { 'line_num': 46, 'column_num': 13 },
-      has_entry( 'message', contains_string( 'const struct Foo *' ) ),
+      has_entry( 'message', equal_to( 'const Foo *cpFoo = &foo; // In main' ) ),
       requests.codes.ok ],
     # [ { 'line_num': 46, 'column_num': 20 }, 'const int' ],
     [ { 'line_num': 47, 'column_num': 12 },
-      has_entry( 'message', contains_string( 'Foo' ) ),
+      has_entry( 'message', equal_to( 'Foo &rFoo = foo; // In main' ) ),
       requests.codes.ok ],
     [ { 'line_num': 47, 'column_num': 17 },
-      has_entry( 'message', contains_string( 'int' ) ),
+      has_entry( 'message', equal_to( 'int y; // In Foo' ) ),
       requests.codes.ok ],
     [ { 'line_num': 48, 'column_num': 12 },
-      has_entry( 'message', contains_string( 'Foo *' ) ),
+      has_entry( 'message', equal_to( 'Foo *pFoo = &foo; // In main' ) ),
       requests.codes.ok ],
     [ { 'line_num': 48, 'column_num': 18 },
-      has_entry( 'message', contains_string( 'int' ) ),
+      has_entry( 'message', equal_to( 'int x; // In Foo' ) ),
       requests.codes.ok ],
 
     # Auto in declaration
     # [ { 'line_num': 28, 'column_num':  3 }, 'struct Foo &' ],
     # [ { 'line_num': 28, 'column_num': 11 }, 'struct Foo &' ],
     [ { 'line_num': 28, 'column_num': 18 },
-      has_entry( 'message', contains_string( 'struct Foo' ) ),
+      has_entry( 'message', equal_to( 'Foo foo; // In main' ) ),
       requests.codes.ok ],
     # [ { 'line_num': 29, 'column_num':  3 }, 'Foo *' ],
     # [ { 'line_num': 29, 'column_num': 11 }, 'Foo *' ],
     [ { 'line_num': 29, 'column_num': 18 },
-      has_entry( 'message', contains_string( 'Foo' ) ),
+      has_entry( 'message', equal_to( 'Foo foo; // In main' ) ),
       requests.codes.ok ],
     # [ { 'line_num': 31, 'column_num':  3 }, 'const Foo &' ],
     # [ { 'line_num': 31, 'column_num': 16 }, 'const Foo &' ],
@@ -443,19 +458,19 @@ def Subcommands_GetType_test():
     # [ { 'line_num': 35, 'column_num': 14 }, 'const Foo *' ],
     # [ { 'line_num': 35, 'column_num': 22 }, 'const int' ],
     [ { 'line_num': 36, 'column_num': 13 },
-      has_entry( 'message', contains_string( 'Foo' ) ),
+      has_entry( 'message', equal_to( 'auto &arFoo = foo; // In main' ) ),
       requests.codes.ok ],
     [ { 'line_num': 36, 'column_num': 19 },
-      has_entry( 'message', contains_string( 'int' ) ),
+      has_entry( 'message', equal_to( 'int y; // In Foo' ) ),
       requests.codes.ok ],
     # [ { 'line_num': 37, 'column_num': 13 }, 'Foo *' ],
     [ { 'line_num': 37, 'column_num': 20 },
-      has_entry( 'message', contains_string( 'int' ) ),
+      has_entry( 'message', equal_to( 'int x; // In Foo' ) ),
       requests.codes.ok ],
 
     # Unicode
     [ { 'line_num': 51, 'column_num': 13 },
-      has_entry( 'message', contains_string( 'Unicøde *' ) ),
+      has_entry( 'message', equal_to( 'Unicøde *ø; // In main' ) ),
       requests.codes.ok ],
 
     # Bound methods
@@ -464,54 +479,70 @@ def Subcommands_GetType_test():
     # also prohibitively complex to try and strip out.
     [ { 'line_num': 53, 'column_num': 15 },
       has_entry( 'message', matches_regexp(
-          r'int bar\(int i\)(?: __attribute__\(\(thiscall\)\))?' ) ),
+          r'int bar\(int i\)(?: __attribute__\(\(thiscall\)\))?; // In Foo' ) ),
       requests.codes.ok ],
     [ { 'line_num': 54, 'column_num': 18 },
       has_entry( 'message', matches_regexp(
-          r'int bar\(int i\)(?: __attribute__\(\(thiscall\)\))?' ) ),
+          r'int bar\(int i\)(?: __attribute__\(\(thiscall\)\))?; // In Foo' ) ),
       requests.codes.ok ],
-  ]
+    # Multi-line function declaration
+    [ { 'line_num': 58, 'column_num': 20 },
+      has_entry( 'message', equal_to(
+          'unsigned long long long_function_name(unsigned long long first, '
+          'unsigned long long second)' ) ),
+      requests.codes.ok ],
+    [ { 'line_num': 61, 'column_num': 20 },
+      has_entry( 'message', equal_to(
+          'unsigned long long long_function_name(unsigned long long first, '
+          'unsigned long long second); // In namespace ns' ) ),
+      requests.codes.ok ],
+  ] )
+@pytest.mark.parametrize( 'subcommand', [ 'GetType', 'GetTypeImprecise' ] )
+@SharedYcmd
+def Subcommands_GetType_test( app, subcommand, test ):
+  RunGetSemanticTest( app,
+                      PathToTestFile( 'GetType_Clang_test.cc' ),
+                      'cpp',
+                      test,
+                      [ subcommand ],
+                      test[ 2 ] )
 
-  for subcommand in [ 'GetType', 'GetTypeImprecise' ]:
-    for test in tests:
-      yield ( RunGetSemanticTest,
-              PathToTestFile( 'GetType_Clang_test.cc' ),
-              'cpp',
-              test,
-              [ subcommand ],
-              test[ 2 ] )
 
-
-def Subcommands_GetDoc_test():
-  tests = [
+@pytest.mark.parametrize( 'test', [
     # from local file
     [ { 'line_num': 5, 'column_num': 10 },
-      has_entry( 'detailed_info', contains_string( 'docstring' ) ),
+      has_entry( 'detailed_info', equal_to(
+        'function docstring_int_main_TU_file\n\n→ void\ndocstring\n\n'
+        'void docstring_int_main_TU_file()' ) ),
       requests.codes.ok ],
     # from header
     [ { 'line_num': 6, 'column_num': 10 },
-      has_entry( 'detailed_info', contains_string( 'docstring' ) ),
+      has_entry( 'detailed_info', equal_to(
+        'function docstring_from_header_file\n\n→ void\ndocstring\n\n'
+        'void docstring_from_header_file()' ) ),
       requests.codes.ok ],
     # no docstring
     [ { 'line_num': 7, 'column_num': 7 },
-      has_entry( 'detailed_info', contains_string( 'int x = 3' ) ),
+      has_entry( 'detailed_info', equal_to(
+        'variable x\n\nType: int\nValue = 3\n\n'
+        '// In docstring_int_main_TU_file\nint x = 3' ) ),
       requests.codes.ok ],
     # no hover
     [ { 'line_num': 8, 'column_num': 1 },
       ErrorMatcher( RuntimeError, 'No documentation available.' ),
       requests.codes.server_error ]
-  ]
-  for subcommand in [ 'GetDoc', 'GetDocImprecise' ]:
-    for test in tests:
-      yield ( RunGetSemanticTest,
-              PathToTestFile( 'GetDoc_Clang_test.cc' ),
-              'cpp',
-              test,
-              [ subcommand ],
-              test[ 2 ] )
-
-
+  ] )
+@pytest.mark.parametrize( 'subcommand', [ 'GetDoc', 'GetDocImprecise' ] )
 @SharedYcmd
+def Subcommands_GetDoc_test( app, subcommand, test ):
+  RunGetSemanticTest( app,
+                      PathToTestFile( 'GetDoc_Clang_test.cc' ),
+                      'cpp',
+                      test,
+                      [ subcommand ],
+                      test[ 2 ] )
+
+
 def RunFixItTest( app, line, column, lang, file_path, check ):
   contents = ReadFile( file_path )
 
@@ -555,8 +586,9 @@ def FixIt_Check_cpp11_Ins( results ):
   # First fixit
   #   switch(A()) { // expected-error{{explicit conversion to}}
   assert_that( results, has_entries( {
-    'fixits': contains( has_entries( {
-      'chunks': contains(
+    'fixits': contains_exactly( has_entries( {
+      'kind': 'quickfix',
+      'chunks': contains_exactly(
         has_entries( {
           'replacement_text': equal_to( 'static_cast<int>(' ),
           'range': has_entries( {
@@ -581,8 +613,9 @@ def FixIt_Check_cpp11_InsMultiLine( results ):
   # Similar to FixIt_Check_cpp11_1 but inserts split across lines
   #
   assert_that( results, has_entries( {
-    'fixits': contains( has_entries( {
-      'chunks': contains(
+    'fixits': contains_exactly( has_entries( {
+      'kind': 'quickfix',
+      'chunks': contains_exactly(
         has_entries( {
           'replacement_text': equal_to( 'static_cast<int>(' ),
           'range': has_entries( {
@@ -606,8 +639,9 @@ def FixIt_Check_cpp11_InsMultiLine( results ):
 def FixIt_Check_cpp11_Del( results ):
   # Removal of ::
   assert_that( results, has_entries( {
-    'fixits': contains( has_entries( {
-      'chunks': contains(
+    'fixits': contains_exactly( has_entries( {
+      'kind': 'quickfix',
+      'chunks': contains_exactly(
         has_entries( {
           'replacement_text': equal_to( '' ),
           'range': has_entries( {
@@ -623,8 +657,9 @@ def FixIt_Check_cpp11_Del( results ):
 
 def FixIt_Check_cpp11_Repl( results ):
   assert_that( results, has_entries( {
-    'fixits': contains( has_entries( {
-      'chunks': contains(
+    'fixits': contains_exactly( has_entries( {
+      'kind': 'quickfix',
+      'chunks': contains_exactly(
         has_entries( {
           'replacement_text': equal_to( 'foo' ),
           'range': has_entries( {
@@ -640,9 +675,10 @@ def FixIt_Check_cpp11_Repl( results ):
 
 def FixIt_Check_cpp11_DelAdd( results ):
   assert_that( results, has_entries( {
-    'fixits': contains(
+    'fixits': contains_exactly(
       has_entries( {
-        'chunks': contains(
+        'kind': 'quickfix',
+        'chunks': contains_exactly(
           has_entries( {
             'replacement_text': equal_to( '' ),
             'range': has_entries( {
@@ -661,7 +697,7 @@ def FixIt_Check_cpp11_DelAdd( results ):
         'location': has_entries( { 'line_num': 48, 'column_num': 3 } )
       } ),
       has_entries( {
-        'chunks': contains(
+        'chunks': contains_exactly(
           has_entries( {
             'replacement_text': equal_to( '= default;' ),
             'range': has_entries( {
@@ -672,14 +708,21 @@ def FixIt_Check_cpp11_DelAdd( results ):
         ),
         'location': has_entries( { 'line_num': 48, 'column_num': 3 } )
       } ),
+      # Unresolved, requires /resolve_fixit request
+      has_entries( {
+        'text': 'Move function body to declaration',
+        'resolve': True,
+        'command': has_entries( { 'command': 'clangd.applyTweak' } )
+      } ),
     )
   } ) )
 
 
 def FixIt_Check_objc( results ):
   assert_that( results, has_entries( {
-    'fixits': contains( has_entries( {
-      'chunks': contains(
+    'fixits': contains_exactly( has_entries( {
+      'kind': 'quickfix',
+      'chunks': contains_exactly(
         has_entries( {
           'replacement_text': equal_to( 'id' ),
           'range': has_entries( {
@@ -700,10 +743,11 @@ def FixIt_Check_objc_NoFixIt( results ):
 
 def FixIt_Check_cpp11_MultiFirst( results ):
   assert_that( results, has_entries( {
-    'fixits': contains(
+    'fixits': contains_exactly(
       # first fix-it at 54,16
       has_entries( {
-        'chunks': contains(
+        'kind': 'quickfix',
+        'chunks': contains_exactly(
           has_entries( {
             'replacement_text': equal_to( 'foo' ),
             'range': has_entries( {
@@ -716,7 +760,8 @@ def FixIt_Check_cpp11_MultiFirst( results ):
       } ),
       # second fix-it at 54,52
       has_entries( {
-        'chunks': contains(
+        'kind': 'quickfix',
+        'chunks': contains_exactly(
           has_entries( {
             'replacement_text': equal_to( '' ),
             'range': has_entries( {
@@ -735,7 +780,8 @@ def FixIt_Check_cpp11_MultiFirst( results ):
         'location': has_entries( { 'line_num': 54, 'column_num': 15 } )
       } ),
       has_entries( {
-        'chunks': contains(
+        'kind': 'quickfix',
+        'chunks': contains_exactly(
           has_entries( {
             'replacement_text': equal_to( '= default;' ),
             'range': has_entries( {
@@ -752,10 +798,11 @@ def FixIt_Check_cpp11_MultiFirst( results ):
 
 def FixIt_Check_cpp11_MultiSecond( results ):
   assert_that( results, has_entries( {
-    'fixits': contains(
+    'fixits': contains_exactly(
       # first fix-it at 54,16
       has_entries( {
-        'chunks': contains(
+        'kind': 'quickfix',
+        'chunks': contains_exactly(
           has_entries( {
             'replacement_text': equal_to( 'foo' ),
             'range': has_entries( {
@@ -768,7 +815,8 @@ def FixIt_Check_cpp11_MultiSecond( results ):
       } ),
       # second fix-it at 54,52
       has_entries( {
-        'chunks': contains(
+        'kind': 'quickfix',
+        'chunks': contains_exactly(
           has_entries( {
             'replacement_text': equal_to( '' ),
             'range': has_entries( {
@@ -787,7 +835,8 @@ def FixIt_Check_cpp11_MultiSecond( results ):
         'location': has_entries( { 'line_num': 54, 'column_num': 51 } )
       } ),
       has_entries( {
-        'chunks': contains(
+        'kind': 'quickfix',
+        'chunks': contains_exactly(
           has_entries( {
             'replacement_text': equal_to( '= default;' ),
             'range': has_entries( {
@@ -804,8 +853,9 @@ def FixIt_Check_cpp11_MultiSecond( results ):
 
 def FixIt_Check_unicode_Ins( results ):
   assert_that( results, has_entries( {
-    'fixits': contains( has_entries( {
-      'chunks': contains(
+    'fixits': contains_exactly( has_entries( {
+      'kind': 'quickfix',
+      'chunks': contains_exactly(
         has_entries( {
           'replacement_text': equal_to( '=' ),
           'range': has_entries( {
@@ -821,11 +871,12 @@ def FixIt_Check_unicode_Ins( results ):
 
 def FixIt_Check_cpp11_Note( results ):
   assert_that( results, has_entries( {
-    'fixits': contains(
+    'fixits': contains_exactly(
       # First note: put parens around it
       has_entries( {
+        'kind': 'quickfix',
         'text': contains_string( 'parentheses around the assignment' ),
-        'chunks': contains(
+        'chunks': contains_exactly(
           ChunkMatcher( '(',
                         LineColMatcher( 59, 8 ),
                         LineColMatcher( 59, 8 ) ),
@@ -838,32 +889,28 @@ def FixIt_Check_cpp11_Note( results ):
 
       # Second note: change to ==
       has_entries( {
+        'kind': 'quickfix',
         'text': contains_string( '==' ),
-        'chunks': contains(
+        'chunks': contains_exactly(
           ChunkMatcher( '==',
                         LineColMatcher( 60, 8 ),
                         LineColMatcher( 60, 9 ) )
         ),
         'location': LineColMatcher( 60, 1 ),
       } ),
-      # Unresolved, requires /resolve_fixit request
-      has_entries( {
-        'text': 'Extract subexpression to variable',
-        'resolve': True,
-        'command': has_entries( { 'command': 'clangd.applyTweak' } )
-      } )
     )
   } ) )
 
 
 def FixIt_Check_cpp11_SpellCheck( results ):
   assert_that( results, has_entries( {
-    'fixits': contains(
+    'fixits': contains_exactly(
       # Change to SpellingIsNotMyStrongPoint
       has_entries( {
+        'kind': 'quickfix',
         'text': contains_string( "change 'SpellingIsNotMyStringPiont' to "
                                  "'SpellingIsNotMyStrongPoint'" ),
-        'chunks': contains(
+        'chunks': contains_exactly(
           ChunkMatcher( 'SpellingIsNotMyStrongPoint',
                         LineColMatcher( 72, 9 ),
                         LineColMatcher( 72, 35 ) )
@@ -875,11 +922,12 @@ def FixIt_Check_cpp11_SpellCheck( results ):
 
 def FixIt_Check_cuda( results ):
   assert_that( results, has_entries( {
-    'fixits': contains(
+    'fixits': contains_exactly(
       has_entries( {
+        'kind': 'quickfix',
         'text': contains_string(
            "change 'int' to 'void'" ),
-        'chunks': contains(
+        'chunks': contains_exactly(
           ChunkMatcher( 'void',
                         LineColMatcher( 3, 12 ),
                         LineColMatcher( 3, 15 ) )
@@ -891,15 +939,15 @@ def FixIt_Check_cuda( results ):
 
 def FixIt_Check_SubexprExtract_Resolved( results ):
   assert_that( results, has_entries( {
-    'fixits': contains( has_entries( {
+    'fixits': contains_exactly( has_entries( {
         'text': 'Extract subexpression to variable',
-        'chunks': contains(
-          ChunkMatcher( 'auto dummy = foo(i + 3);\n  ',
+        'chunks': contains_exactly(
+          ChunkMatcher( 'auto dummy = i + 3;\n  ',
                         LineColMatcher( 84, 3 ),
                         LineColMatcher( 84, 3 ) ),
           ChunkMatcher( 'dummy',
-                        LineColMatcher( 84, 10 ),
-                        LineColMatcher( 84, 22 ) ),
+                        LineColMatcher( 84, 14 ),
+                        LineColMatcher( 84, 21 ) ),
         )
     } ) )
   } ) )
@@ -907,9 +955,9 @@ def FixIt_Check_SubexprExtract_Resolved( results ):
 
 def FixIt_Check_RawStringReplace_Resolved( results ):
   assert_that( results, has_entries( {
-    'fixits': contains( has_entries( {
+    'fixits': contains_exactly( has_entries( {
         'text': 'Convert to raw string',
-        'chunks': contains(
+        'chunks': contains_exactly(
           ChunkMatcher( 'R"(\\\\r\\asd\n\\v)"',
                         LineColMatcher( 80, 19 ),
                         LineColMatcher( 80, 36 ) ),
@@ -920,9 +968,9 @@ def FixIt_Check_RawStringReplace_Resolved( results ):
 
 def FixIt_Check_MacroExpand_Resolved( results ):
   assert_that( results, has_entries( {
-    'fixits': contains( has_entries( {
+    'fixits': contains_exactly( has_entries( {
         'text': "Expand macro 'DECLARE_INT'",
-        'chunks': contains(
+        'chunks': contains_exactly(
           ChunkMatcher( 'int i',
                         LineColMatcher( 83,  3 ),
                         LineColMatcher( 83, 17 ) ),
@@ -933,9 +981,9 @@ def FixIt_Check_MacroExpand_Resolved( results ):
 
 def FixIt_Check_AutoExpand_Resolved( results ):
   assert_that( results, has_entries( {
-    'fixits': contains( has_entries( {
+    'fixits': contains_exactly( has_entries( {
         'text': "Expand auto type",
-        'chunks': contains(
+        'chunks': contains_exactly(
           ChunkMatcher( 'const char *',
                         LineColMatcher( 80, 1 ),
                         LineColMatcher( 80, 6 ) ),
@@ -944,51 +992,46 @@ def FixIt_Check_AutoExpand_Resolved( results ):
   } ) )
 
 
-def Subcommands_FixIt_all_test():
-  cfile = PathToTestFile( 'FixIt_Clang_cpp11.cpp' )
-  mfile = PathToTestFile( 'objc', 'FixIt_Clang_objc.m' )
-  cufile = PathToTestFile( 'cuda', 'fixit_test.cu' )
-  ufile = PathToTestFile( 'unicode.cc' )
-
-  tests = [
-    # L
-    # i   C
-    # n   o
-    # e   l   Lang     File,  Checker
-    [ 16, 0,  'cpp11', cfile, FixIt_Check_cpp11_Ins ],
-    [ 25, 14, 'cpp11', cfile, FixIt_Check_cpp11_InsMultiLine ],
-    [ 35, 7,  'cpp11', cfile, FixIt_Check_cpp11_Del ],
-    [ 40, 6,  'cpp11', cfile, FixIt_Check_cpp11_Repl ],
-    [ 48, 3,  'cpp11', cfile, FixIt_Check_cpp11_DelAdd ],
-
-    [ 5, 3,   'objective-c', mfile, FixIt_Check_objc ],
-    [ 7, 1,   'objective-c', mfile, FixIt_Check_objc_NoFixIt ],
-
-    [ 3, 12,  'cuda', cufile, FixIt_Check_cuda ],
-
+@pytest.mark.parametrize( 'line,column,language,filepath,check', [
+    [ 16, 0,  'cpp11', PathToTestFile( 'FixIt_Clang_cpp11.cpp' ),
+      FixIt_Check_cpp11_Ins ],
+    [ 25, 14, 'cpp11', PathToTestFile( 'FixIt_Clang_cpp11.cpp' ),
+      FixIt_Check_cpp11_InsMultiLine ],
+    [ 35, 7,  'cpp11', PathToTestFile( 'FixIt_Clang_cpp11.cpp' ),
+      FixIt_Check_cpp11_Del ],
+    [ 40, 6,  'cpp11', PathToTestFile( 'FixIt_Clang_cpp11.cpp' ),
+      FixIt_Check_cpp11_Repl ],
+    [ 48, 3,  'cpp11', PathToTestFile( 'FixIt_Clang_cpp11.cpp' ),
+      FixIt_Check_cpp11_DelAdd ],
+    [ 5, 3,   'objective-c', PathToTestFile( 'objc', 'FixIt_Clang_objc.m' ),
+      FixIt_Check_objc ],
+    [ 7, 1,   'objective-c', PathToTestFile( 'objc', 'FixIt_Clang_objc.m' ),
+      FixIt_Check_objc_NoFixIt ],
+    [ 3, 12,  'cuda', PathToTestFile( 'cuda', 'fixit_test.cu' ),
+      FixIt_Check_cuda ],
     # multiple errors on a single line; both with fixits
-    [ 54, 15, 'cpp11', cfile, FixIt_Check_cpp11_MultiFirst ],
-
+    [ 54, 15, 'cpp11', PathToTestFile( 'FixIt_Clang_cpp11.cpp' ),
+      FixIt_Check_cpp11_MultiFirst ],
     # should put closest fix-it first?
-    [ 54, 51, 'cpp11', cfile, FixIt_Check_cpp11_MultiSecond ],
-
+    [ 54, 51, 'cpp11', PathToTestFile( 'FixIt_Clang_cpp11.cpp' ),
+      FixIt_Check_cpp11_MultiSecond ],
     # unicode in line for fixit
-    [ 21, 16, 'cpp11', ufile, FixIt_Check_unicode_Ins ],
-
+    [ 21, 16, 'cpp11', PathToTestFile( 'unicode.cc' ),
+      FixIt_Check_unicode_Ins ],
     # FixIt attached to a "child" diagnostic (i.e. a Note)
-    [ 60, 1,  'cpp11', cfile, FixIt_Check_cpp11_Note ],
-
+    [ 60, 1,  'cpp11', PathToTestFile( 'FixIt_Clang_cpp11.cpp' ),
+      FixIt_Check_cpp11_Note ],
     # FixIt due to forced spell checking
-    [ 72, 9,  'cpp11', cfile, FixIt_Check_cpp11_SpellCheck ],
-  ]
-
-  for test in tests:
-    yield RunFixItTest, test[ 0 ], test[ 1 ], test[ 2 ], test[ 3 ], test[ 4 ]
+    [ 72, 9,  'cpp11', PathToTestFile( 'FixIt_Clang_cpp11.cpp' ),
+      FixIt_Check_cpp11_SpellCheck ],
+  ] )
+@SharedYcmd
+def Subcommands_FixIt_all_test( app, line, column, language, filepath, check ):
+  RunFixItTest( app, line, column, language, filepath, check )
 
 
 @WithRetry
-@SharedYcmd
-def RunRangedFixItTest( app, rng, expected ):
+def RunRangedFixItTest( app, rng, expected, chosen_fixit = 0 ):
   contents = ReadFile( PathToTestFile( 'FixIt_Clang_cpp11.cpp' ) )
   args = {
     'completer_target' : 'filetype_default',
@@ -1006,7 +1049,7 @@ def RunRangedFixItTest( app, rng, expected ):
   WaitUntilCompleterServerReady( app, 'cpp' )
   response = app.post_json( '/run_completer_command',
                             BuildRequest( **args ) ).json
-  args[ 'fixit' ] = response[ 'fixits' ][ 0 ]
+  args[ 'fixit' ] = response[ 'fixits' ][ chosen_fixit ]
   response = app.post_json( '/resolve_fixit',
                             BuildRequest( **args ) ).json
   print( 'Resolved fixit response = ' )
@@ -1014,31 +1057,31 @@ def RunRangedFixItTest( app, rng, expected ):
   expected( response )
 
 
-def Subcommands_FixIt_Ranged_test():
-  expand_auto_range = {
-    'start': { 'line_num': 80, 'column_num': 1 },
-    'end': { 'line_num': 80, 'column_num': 4 },
-  }
-  subexpression_extract_range = {
-    'start': { 'line_num': 84, 'column_num': 14 },
-    'end': { 'line_num': 84, 'column_num': 20 },
-  }
-  macro_expand_range = {
-    'start': { 'line_num': 83, 'column_num': 3 },
-    'end': { 'line_num': 83, 'column_num': 13 },
-  }
-  raw_string_range = {
-    'start': { 'line_num': 80, 'column_num': 19 },
-    'end': { 'line_num': 80, 'column_num': 35 },
-  }
-  tests = [
-    [ expand_auto_range, FixIt_Check_AutoExpand_Resolved ],
-    [ macro_expand_range, FixIt_Check_MacroExpand_Resolved ],
-    [ subexpression_extract_range, FixIt_Check_SubexprExtract_Resolved ],
-    [ raw_string_range, FixIt_Check_RawStringReplace_Resolved ],
-  ]
-  for test in tests:
-    yield RunRangedFixItTest, test[ 0 ], test[ 1 ]
+@pytest.mark.parametrize( 'test', [
+    [ {
+        'start': { 'line_num': 80, 'column_num': 1 },
+        'end': { 'line_num': 80, 'column_num': 4 },
+      },
+      FixIt_Check_AutoExpand_Resolved ],
+    [ {
+        'start': { 'line_num': 83, 'column_num': 3 },
+        'end': { 'line_num': 83, 'column_num': 13 },
+      },
+      FixIt_Check_MacroExpand_Resolved ],
+    [ {
+        'start': { 'line_num': 84, 'column_num': 14 },
+        'end': { 'line_num': 84, 'column_num': 20 },
+      },
+      FixIt_Check_SubexprExtract_Resolved ],
+    [ {
+        'start': { 'line_num': 80, 'column_num': 19 },
+        'end': { 'line_num': 80, 'column_num': 35 },
+      },
+      FixIt_Check_RawStringReplace_Resolved ],
+  ] )
+@SharedYcmd
+def Subcommands_FixIt_Ranged_test( app, test ):
+  RunRangedFixItTest( app, test[ 0 ], test[ 1 ] )
 
 
 @WithRetry
@@ -1072,6 +1115,24 @@ def Subcommands_FixIt_AlreadyResolved_test( app ):
   assert_that( actual, equal_to( expected ) )
 
 
+@IsolatedYcmd( { 'clangd_args': [ '-hidden-features' ] } )
+def Subcommands_FixIt_ClangdTweaks_test( app ):
+  selection = {
+      'start': { 'line_num': 80, 'column_num': 19 },
+      'end': { 'line_num': 80, 'column_num': 4 }
+  }
+
+  def NoFixitsProduced( results ):
+    assert_that( results, has_entries( {
+      'fixits': contains_exactly( has_entries( {
+        'chunks': [],
+        'location': LocationMatcher(
+                      PathToTestFile( 'FixIt_Clang_cpp11.cpp' ), 1, 1 )
+      } ) )
+    } ) )
+  RunRangedFixItTest( app, selection, NoFixitsProduced, 2 )
+
+
 @SharedYcmd
 def Subcommands_RefactorRename_test( app ):
   test = {
@@ -1087,8 +1148,8 @@ def Subcommands_RefactorRename_test( app ):
     'expect': {
       'response': requests.codes.ok,
       'data': has_entries( {
-        'fixits': contains( has_entries( {
-          'chunks': contains(
+        'fixits': contains_exactly( has_entries( {
+          'chunks': contains_exactly(
             ChunkMatcher( 'Bar',
                           LineColMatcher( 1, 8 ),
                           LineColMatcher( 1, 11 ) ),

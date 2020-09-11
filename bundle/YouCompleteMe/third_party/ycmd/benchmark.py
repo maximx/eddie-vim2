@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 from __future__ import print_function
 from __future__ import division
@@ -28,7 +28,6 @@ def BuildYcmdLibsAndRunBenchmark( args, extra_args ):
     sys.executable,
     p.join( DIR_OF_THIS_SCRIPT, 'build.py' ),
     '--clang-completer',
-    '--no-regex'
   ] + extra_args
 
   os.environ[ 'YCM_BENCHMARK' ] = '1'

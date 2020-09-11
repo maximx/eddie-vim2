@@ -1,4 +1,4 @@
-# Copyright (C) 2017-2019 ycmd contributors
+# Copyright (C) 2017-2020 ycmd contributors
 #
 # This file is part of ycmd.
 #
@@ -15,13 +15,6 @@
 # You should have received a copy of the GNU General Public License
 # along with ycmd.  If not, see <http://www.gnu.org/licenses/>.
 
-from __future__ import unicode_literals
-from __future__ import print_function
-from __future__ import division
-from __future__ import absolute_import
-# Not installing aliases from python-future; it's unreliable and slow.
-from builtins import *  # noqa
-
 import glob
 import hashlib
 import json
@@ -32,7 +25,7 @@ import threading
 
 from ycmd import responses, utils
 from ycmd.completers.language_server import language_server_protocol as lsp
-from ycmd.completers.language_server import simple_language_server_completer
+from ycmd.completers.language_server import language_server_completer
 from ycmd.utils import LOGGER
 
 NO_DOCUMENTATION_MESSAGE = 'No documentation available for current context'
@@ -286,10 +279,10 @@ def _WorkspaceDirForProject( workspace_root_path,
                        utils.ToUnicode( project_dir_hash.hexdigest() ) )
 
 
-class JavaCompleter( simple_language_server_completer.SimpleLSPCompleter ):
+class JavaCompleter( language_server_completer.LanguageServerCompleter ):
   def __init__( self, user_options ):
     self._workspace_path = None
-    super( JavaCompleter, self ).__init__( user_options )
+    super().__init__( user_options )
 
     self._server_keep_logfiles = user_options[ 'server_keep_logfiles' ]
     self._use_clean_workspace = user_options[ CLEAN_WORKSPACE_OPTION ]
@@ -376,7 +369,7 @@ class JavaCompleter( simple_language_server_completer.SimpleLSPCompleter ):
   def ServerIsReady( self ):
     return ( self.ServerIsHealthy() and
              self._received_ready_message.is_set() and
-             super( JavaCompleter, self ).ServerIsReady() )
+             super().ServerIsReady() )
 
 
   def GetProjectDirectory( self, *args, **kwargs ):
@@ -388,11 +381,9 @@ class JavaCompleter( simple_language_server_completer.SimpleLSPCompleter ):
     if len( args ) > 0 and '--with-config' in args:
       with_config = True
 
-    with self._server_state_mutex:
-      self.Shutdown()
-      self._StartAndInitializeServer( request_data,
-                                      wipe_workspace = True,
-                                      wipe_config = with_config )
+    self._RestartServer( request_data,
+                         wipe_workspace = True,
+                         wipe_config = with_config )
 
 
   def _OpenProject( self, request_data, args ):
@@ -411,10 +402,7 @@ class JavaCompleter( simple_language_server_completer.SimpleLSPCompleter ):
         request_data[ 'working_dir' ],
         project_directory ) )
 
-    with self._server_state_mutex:
-      self.Shutdown()
-      self._StartAndInitializeServer( request_data,
-                                      project_directory = project_directory )
+    self._RestartServer( request_data, project_directory = project_directory )
 
 
   def _Reset( self ):
@@ -434,7 +422,7 @@ class JavaCompleter( simple_language_server_completer.SimpleLSPCompleter ):
 
     self._started_message_sent = False
 
-    super( JavaCompleter, self )._Reset()
+    super()._Reset()
 
 
 
@@ -443,42 +431,53 @@ class JavaCompleter( simple_language_server_completer.SimpleLSPCompleter ):
                    project_directory = None,
                    wipe_workspace = False,
                    wipe_config = False ):
-    with self._server_state_mutex:
-      LOGGER.info( 'Starting jdt.ls Language Server...' )
+    try:
+      with self._server_info_mutex:
+        LOGGER.info( 'Starting jdt.ls Language Server...' )
 
-      if project_directory:
-        self._java_project_dir = project_directory
-      else:
-        self._java_project_dir = _FindProjectDir(
-          os.path.dirname( request_data[ 'filepath' ] ) )
+        if project_directory:
+          self._java_project_dir = project_directory
+        elif 'project_directory' in self._settings:
+          self._java_project_dir = utils.AbsolutePath(
+            self._settings[ 'project_directory' ],
+            self._extra_conf_dir )
+        else:
+          self._java_project_dir = _FindProjectDir(
+            os.path.dirname( request_data[ 'filepath' ] ) )
 
-      self._workspace_path = _WorkspaceDirForProject(
-        self._workspace_root_path,
-        self._java_project_dir,
-        self._use_clean_workspace )
+        self._workspace_path = _WorkspaceDirForProject(
+          self._workspace_root_path,
+          self._java_project_dir,
+          self._use_clean_workspace )
 
-      if not self._use_clean_workspace and wipe_workspace:
-        if os.path.isdir( self._workspace_path ):
-          LOGGER.info( 'Wiping out workspace {0}'.format(
-            self._workspace_path ) )
-          shutil.rmtree( self._workspace_path )
+        if not self._use_clean_workspace and wipe_workspace:
+          if os.path.isdir( self._workspace_path ):
+            LOGGER.info( 'Wiping out workspace {0}'.format(
+              self._workspace_path ) )
+            shutil.rmtree( self._workspace_path )
 
-      self._launcher_config = _LauncherConfiguration( self._workspace_root_path,
-                                                      wipe_config )
+        self._launcher_config = _LauncherConfiguration(
+            self._workspace_root_path,
+            wipe_config )
 
-      self._command = [
-        PATH_TO_JAVA,
-        '-Dfile.encoding=UTF-8',
-        '-Declipse.application=org.eclipse.jdt.ls.core.id1',
-        '-Dosgi.bundles.defaultStartLevel=4',
-        '-Declipse.product=org.eclipse.jdt.ls.core.product',
-        '-Dlog.level=ALL',
-        '-jar', self._launcher_path,
-        '-configuration', self._launcher_config,
-        '-data', self._workspace_path,
-      ]
+        self._command = [
+          PATH_TO_JAVA,
+          '-Dfile.encoding=UTF-8',
+          '-Declipse.application=org.eclipse.jdt.ls.core.id1',
+          '-Dosgi.bundles.defaultStartLevel=4',
+          '-Declipse.product=org.eclipse.jdt.ls.core.product',
+          '-Dlog.level=ALL',
+          '-jar', self._launcher_path,
+          '-configuration', self._launcher_config,
+          '-data', self._workspace_path,
+        ]
 
-    return super( JavaCompleter, self ).StartServer( request_data )
+        return super( JavaCompleter, self )._StartServerNoLock( request_data )
+    except language_server_completer.LanguageServerConnectionTimeout:
+      LOGGER.error( '%s failed to start, or did not connect successfully',
+                    self.GetServerName() )
+      self.Shutdown()
+      return False
 
 
   def GetCodepointForCompletionRequest( self, request_data ):
@@ -497,8 +496,7 @@ class JavaCompleter( simple_language_server_completer.SimpleLSPCompleter ):
     # even if this means the "filtering and sorting" is not 100% ycmd flavor.
     if request_data[ 'force_semantic' ]:
       return request_data[ 'column_codepoint' ]
-    return super( JavaCompleter, self ).GetCodepointForCompletionRequest(
-      request_data )
+    return super().GetCodepointForCompletionRequest( request_data )
 
 
   def HandleNotificationInPollThread( self, notification ):
@@ -512,7 +510,7 @@ class JavaCompleter( simple_language_server_completer.SimpleLSPCompleter ):
       elif not self._received_ready_message.is_set():
         self._server_init_status = notification[ 'params' ][ 'message' ]
 
-    super( JavaCompleter, self ).HandleNotificationInPollThread( notification )
+    super().HandleNotificationInPollThread( notification )
 
 
   def ConvertNotificationToMessage( self, request_data, notification ):
@@ -527,9 +525,7 @@ class JavaCompleter( simple_language_server_completer.SimpleLSPCompleter ):
         return responses.BuildDisplayMessageResponse(
           'Initializing Java completer: {}'.format( message ) )
 
-    return super( JavaCompleter, self ).ConvertNotificationToMessage(
-      request_data,
-      notification )
+    return super().ConvertNotificationToMessage( request_data, notification )
 
 
   def GetType( self, request_data ):
@@ -632,12 +628,8 @@ class JavaCompleter( simple_language_server_completer.SimpleLSPCompleter ):
     # https://github.com/eclipse/eclipse.jdt.ls/issues/376
     if command[ 'command' ][ 'command' ] == 'java.apply.workspaceEdit':
       command[ 'edit' ] = command.pop( 'command' )[ 'arguments' ][ 0 ]
-      return super( JavaCompleter, self ).CodeActionLiteralToFixIt(
-        request_data,
-        command )
-    return super( JavaCompleter, self ).CodeActionCommandToFixIt(
-      request_data,
-      command )
+      return super().CodeActionLiteralToFixIt( request_data, command )
+    return super().CodeActionCommandToFixIt( request_data, command )
 
 
   def GetServerName( self ):

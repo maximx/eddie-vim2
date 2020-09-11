@@ -1,6 +1,4 @@
-# coding: utf-8
-#
-# Copyright (C) 2019 ycmd contributors
+# Copyright (C) 2020 ycmd contributors
 #
 # This file is part of ycmd.
 #
@@ -17,26 +15,18 @@
 # You should have received a copy of the GNU General Public License
 # along with ycmd.  If not, see <http://www.gnu.org/licenses/>.
 
-from __future__ import absolute_import
-from __future__ import unicode_literals
-from __future__ import print_function
-from __future__ import division
-# Not installing aliases from python-future; it's unreliable and slow.
-from builtins import *  # noqa
-
 from hamcrest import ( assert_that,
-                       contains,
+                       contains_exactly,
                        empty,
                        has_entries,
                        has_items )
-from mock import patch
+from unittest.mock import patch
 from ycmd import handlers
 from ycmd.utils import ReadFile, LOGGER
 from ycmd.tests.cs import ( PathToTestFile,
                             IsolatedYcmd,
                             SharedYcmd,
-                            WrapOmniSharpServer,
-                            WaitUntilCsCompleterIsReady )
+                            WrapOmniSharpServer )
 from ycmd.tests.test_utils import ( BuildRequest,
                                     ParameterMatcher,
                                     SignatureMatcher,
@@ -78,7 +68,7 @@ def SignatureHelp_TriggerComma_test( app ):
       'signature_help': has_entries( {
         'activeSignature': 0,
         'activeParameter': 1,
-        'signatures': contains(
+        'signatures': contains_exactly(
           SignatureMatcher( 'void ContinuousTest.MultiArg(int i, string s)',
                             [ ParameterMatcher( 29, 34 ),
                               ParameterMatcher( 36, 44 ) ] )
@@ -105,7 +95,7 @@ def SignatureHelp_TriggerParen_test( app ):
       'signature_help': has_entries( {
         'activeSignature': 0,
         'activeParameter': 0,
-        'signatures': contains(
+        'signatures': contains_exactly(
           SignatureMatcher( 'void ContinuousTest.Main(string[] args)',
                             [ ParameterMatcher( 25, 38 ) ] )
         )
@@ -154,7 +144,7 @@ def SignatureHelp_MultipleSignatures_test( app ):
       'signature_help': has_entries( {
         'activeSignature': 0,
         'activeParameter': 0,
-        'signatures': contains(
+        'signatures': contains_exactly(
           SignatureMatcher( 'void ContinuousTest.Overloaded(int i, int a)',
                             [ ParameterMatcher( 31, 36 ),
                               ParameterMatcher( 38, 43 ) ] ),
@@ -172,7 +162,7 @@ def SignatureHelp_MultipleSignatures_test( app ):
       'signature_help': has_entries( {
         'activeSignature': 0,
         'activeParameter': 1,
-        'signatures': contains(
+        'signatures': contains_exactly(
           SignatureMatcher( 'void ContinuousTest.Overloaded(int i, int a)',
                             [ ParameterMatcher( 31, 36 ),
                               ParameterMatcher( 38, 43 ) ] ),
@@ -210,7 +200,6 @@ def SignatureHelp_NotAFunction_NoError_test( app ):
 def GetCompletions_Basic_NoSigHelp_test( app ):
   filepath = PathToTestFile( 'testy', 'Program.cs' )
   with WrapOmniSharpServer( app, filepath ):
-    WaitUntilCsCompleterIsReady( app, filepath )
     contents = ReadFile( filepath )
 
     completion_data = BuildRequest( filepath = filepath,

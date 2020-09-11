@@ -1,4 +1,4 @@
-# Copyright (C) 2015-2018 ycmd contributors
+# Copyright (C) 2015-2020 ycmd contributors
 #
 # This file is part of ycmd.
 #
@@ -15,13 +15,6 @@
 # You should have received a copy of the GNU General Public License
 # along with ycmd.  If not, see <http://www.gnu.org/licenses/>.
 
-from __future__ import unicode_literals
-from __future__ import print_function
-from __future__ import division
-from __future__ import absolute_import
-# Not installing aliases from python-future; it's unreliable and slow.
-from builtins import *  # noqa
-
 import json
 import logging
 import os
@@ -33,6 +26,7 @@ from functools import partial
 
 from tempfile import NamedTemporaryFile
 
+from ycmd import extra_conf_store
 from ycmd import responses
 from ycmd import utils
 from ycmd.completers.completer import Completer
@@ -51,7 +45,7 @@ TSSERVER_DIR = os.path.abspath(
 LOGFILE_FORMAT = 'tsserver_'
 
 
-class DeferredResponse( object ):
+class DeferredResponse:
   """
   A deferred that resolves to a response from TSServer.
   """
@@ -78,7 +72,10 @@ class DeferredResponse( object ):
       return self._message[ 'body' ]
 
 
-def FindTSServer():
+def FindTSServer( user_options_path ):
+  tsserver = utils.FindExecutableWithFallback( user_options_path , None )
+  if tsserver and os.path.isfile( tsserver ):
+    return tsserver
   # The TSServer executable is installed at the root directory on Windows while
   # it's installed in the bin folder on other platforms.
   for executable in [ os.path.join( TSSERVER_DIR, 'bin', 'tsserver' ),
@@ -90,8 +87,8 @@ def FindTSServer():
   return None
 
 
-def ShouldEnableTypeScriptCompleter():
-  tsserver = FindTSServer()
+def ShouldEnableTypeScriptCompleter( user_options ):
+  tsserver = FindTSServer( user_options[ 'tsserver_binary_path' ] )
   if not tsserver:
     LOGGER.error( 'Not using TypeScript completer: TSServer not installed '
                   'in %s', TSSERVER_DIR )
@@ -133,24 +130,25 @@ class TypeScriptCompleter( Completer ):
   It uses TSServer which is bundled with TypeScript 1.5
 
   See the protocol here:
-  https://github.com/Microsoft/TypeScript/blob/2cb0dfd99dc2896958b75e44303d8a7a32e5dc33/src/server/protocol.d.ts
+  https://github.com/microsoft/TypeScript/blob/master/src/server/protocol.ts
   """
 
 
   def __init__( self, user_options ):
-    super( TypeScriptCompleter, self ).__init__( user_options )
+    super().__init__( user_options )
 
     self._logfile = None
 
-    self._tsserver_lock = threading.RLock()
+    self._tsserver_lock = threading.Lock()
     self._tsserver_handle = None
     self._tsserver_version = None
-    self._tsserver_executable = FindTSServer()
+    self._tsserver_executable = FindTSServer(
+        user_options[ 'tsserver_binary_path' ] )
     # Used to read response only if TSServer is running.
     self._tsserver_is_running = threading.Event()
 
     # Used to prevent threads from concurrently writing to
-    # the tsserver process' stdin
+    # the tsserver process's stdin
     self._write_lock = threading.Lock()
 
     # Each request sent to tsserver must have a sequence id.
@@ -176,13 +174,12 @@ class TypeScriptCompleter( Completer ):
     self._latest_diagnostics_for_file_lock = threading.Lock()
     self._latest_diagnostics_for_file = defaultdict( list )
 
-    # There's someting in the API that lists the trigger characters, but
+    # There's something in the API that lists the trigger characters, but
     # there is no way to request that from the server, so we just hard-code
     # the signature triggers.
     self.SetSignatureHelpTriggers( [ '(', ',', '<' ] )
 
     LOGGER.info( 'Enabling TypeScript completion' )
-
 
   def _SetServerVersion( self ):
     version = self._SendRequest( 'status' )[ 'version' ]
@@ -192,31 +189,36 @@ class TypeScriptCompleter( Completer ):
 
   def _StartServer( self ):
     with self._tsserver_lock:
-      if self._ServerIsRunning():
-        return
+      self._StartServerNoLock()
 
-      self._logfile = utils.CreateLogfile( LOGFILE_FORMAT )
-      tsserver_log = '-file {path} -level {level}'.format( path = self._logfile,
-                                                           level = _LogLevel() )
-      # TSServer gets the configuration for the log file through the
-      # environment variable 'TSS_LOG'. This seems to be undocumented but
-      # looking at the source code it seems like this is the way:
-      # https://github.com/Microsoft/TypeScript/blob/8a93b489454fdcbdf544edef05f73a913449be1d/src/server/server.ts#L136
-      environ = os.environ.copy()
-      utils.SetEnviron( environ, 'TSS_LOG', tsserver_log )
 
-      LOGGER.info( 'TSServer log file: %s', self._logfile )
+  def _StartServerNoLock( self ):
+    if self._ServerIsRunning():
+      return
 
-      # We need to redirect the error stream to the output one on Windows.
-      self._tsserver_handle = utils.SafePopen( self._tsserver_executable,
-                                               stdin = subprocess.PIPE,
-                                               stdout = subprocess.PIPE,
-                                               stderr = subprocess.STDOUT,
-                                               env = environ )
+    self._logfile = utils.CreateLogfile( LOGFILE_FORMAT )
+    tsserver_log = '-file {path} -level {level}'.format( path = self._logfile,
+                                                         level = _LogLevel() )
+    # TSServer gets the configuration for the log file through the
+    # environment variable 'TSS_LOG'. This seems to be undocumented but
+    # looking at the source code it seems like this is the way:
+    # https://github.com/Microsoft/TypeScript/blob/8a93b489454fdcbdf544edef05f73a913449be1d/src/server/server.ts#L136
+    environ = os.environ.copy()
+    environ[ 'TSS_LOG' ] = tsserver_log
 
-      self._tsserver_is_running.set()
+    LOGGER.info( 'TSServer log file: %s', self._logfile )
 
-      utils.StartThread( self._SetServerVersion )
+    # We need to redirect the error stream to the output one on Windows.
+    self._tsserver_handle = utils.SafePopen( self._tsserver_executable,
+                                             stdin = subprocess.PIPE,
+                                             stdout = subprocess.PIPE,
+                                             stderr = subprocess.STDOUT,
+                                             env = environ )
+
+    LOGGER.info( "TSServer started with PID %s", self._tsserver_handle.pid )
+    self._tsserver_is_running.set()
+
+    utils.StartThread( self._SetServerVersion )
 
 
   def _ReaderLoop( self ):
@@ -340,7 +342,7 @@ class TypeScriptCompleter( Completer ):
 
   def _Reload( self, request_data ):
     """
-    Syncronize TSServer's view of the file to
+    Synchronize TSServer's view of the file to
     the contents of the unsaved buffer.
     """
 
@@ -357,8 +359,11 @@ class TypeScriptCompleter( Completer ):
 
 
   def _ServerIsRunning( self ):
-    with self._tsserver_lock:
-      return utils.ProcessIsRunning( self._tsserver_handle )
+    return utils.ProcessIsRunning( self._tsserver_handle )
+
+
+  def Language( self ):
+    return 'typescript'
 
 
   def ServerIsHealthy( self ):
@@ -469,6 +474,8 @@ class TypeScriptCompleter( Completer ):
 
 
   def OnFileReadyToParse( self, request_data ):
+    # Only load the extra conf. We don't need it for anything but Format.
+    extra_conf_store.ModuleFileForSourceFile( request_data[ 'filepath' ] )
     self._Reload( request_data )
 
     diagnostics = self.GetDiagnosticsForCurrentFile( request_data )
@@ -869,14 +876,15 @@ class TypeScriptCompleter( Completer ):
     # for the list of options. While not standard, a way to support these
     # options, which is already adopted by a number of clients, would be to read
     # the "formatOptions" field in the tsconfig.json file.
-    options = request_data[ 'options' ]
+    options = dict( request_data[ 'options' ] )
+    options[ 'tabSize' ] = options.pop( 'tab_size' )
+    options[ 'indentSize' ] = options[ 'tabSize' ]
+    options[ 'convertTabsToSpaces' ] = options.pop( 'insert_spaces' )
+    options.update(
+      self.AdditionalFormattingOptions( request_data ) )
     self._SendRequest( 'configure', {
       'file': filepath,
-      'formatOptions': {
-        'tabSize': options[ 'tab_size' ],
-        'indentSize': options[ 'tab_size' ],
-        'convertTabsToSpaces': options[ 'insert_spaces' ],
-      }
+      'formatOptions': options
     } )
 
     response = self._SendRequest( 'format',
@@ -898,8 +906,8 @@ class TypeScriptCompleter( Completer ):
 
   def _RestartServer( self, request_data ):
     with self._tsserver_lock:
-      self._StopServer()
-      self._StartServer()
+      self._StopServerNoLock()
+      self._StartServerNoLock()
       # This is needed because after we restart the TSServer it would lose all
       # the information about the files we were working on. This means that the
       # newly started TSServer will know nothing about the buffer we're working
@@ -911,18 +919,22 @@ class TypeScriptCompleter( Completer ):
 
   def _StopServer( self ):
     with self._tsserver_lock:
-      if self._ServerIsRunning():
-        LOGGER.info( 'Stopping TSServer with PID %s',
-                     self._tsserver_handle.pid )
-        try:
-          self._SendCommand( 'exit' )
-          utils.WaitUntilProcessIsTerminated( self._tsserver_handle,
-                                              timeout = 5 )
-          LOGGER.info( 'TSServer stopped' )
-        except Exception:
-          LOGGER.exception( 'Error while stopping TSServer' )
+      self._StopServerNoLock()
 
-      self._CleanUp()
+
+  def _StopServerNoLock( self ):
+    if self._ServerIsRunning():
+      LOGGER.info( 'Stopping TSServer with PID %s',
+                   self._tsserver_handle.pid )
+      try:
+        self._SendCommand( 'exit' )
+        utils.WaitUntilProcessIsTerminated( self._tsserver_handle,
+                                            timeout = 5 )
+        LOGGER.info( 'TSServer stopped' )
+      except Exception:
+        LOGGER.exception( 'Error while stopping TSServer' )
+
+    self._CleanUp()
 
 
   def _CleanUp( self ):

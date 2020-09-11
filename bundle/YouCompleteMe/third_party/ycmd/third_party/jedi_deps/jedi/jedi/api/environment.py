@@ -10,15 +10,16 @@ from collections import namedtuple
 
 from jedi._compatibility import highest_pickle_protocol, which
 from jedi.cache import memoize_method, time_cache
-from jedi.evaluate.compiled.subprocess import CompiledSubprocess, \
-    EvaluatorSameProcess, EvaluatorSubprocess
+from jedi.inference.compiled.subprocess import CompiledSubprocess, \
+    InferenceStateSameProcess, InferenceStateSubprocess
 
 import parso
 
 _VersionInfo = namedtuple('VersionInfo', 'major minor micro')
 
-_SUPPORTED_PYTHONS = ['3.8', '3.7', '3.6', '3.5', '3.4', '2.7']
+_SUPPORTED_PYTHONS = ['3.8', '3.7', '3.6', '3.5', '2.7']
 _SAFE_PATHS = ['/usr/bin', '/usr/local/bin']
+_CONDA_VAR = 'CONDA_PREFIX'
 _CURRENT_VERSION = '%s.%s' % (sys.version_info.major, sys.version_info.minor)
 
 
@@ -90,8 +91,8 @@ class Environment(_BaseEnvironment):
         """
         self.version_info = _VersionInfo(*info[2])
         """
-        Like ``sys.version_info``. A tuple to show the current Environment's
-        Python version.
+        Like :data:`sys.version_info`: a tuple to show the current
+        Environment's Python version.
         """
 
         # py2 sends bytes via pickle apparently?!
@@ -109,14 +110,14 @@ class Environment(_BaseEnvironment):
         version = '.'.join(str(i) for i in self.version_info)
         return '<%s: %s in %s>' % (self.__class__.__name__, version, self.path)
 
-    def get_evaluator_subprocess(self, evaluator):
-        return EvaluatorSubprocess(evaluator, self._get_subprocess())
+    def get_inference_state_subprocess(self, inference_state):
+        return InferenceStateSubprocess(inference_state, self._get_subprocess())
 
     @memoize_method
     def get_sys_path(self):
         """
         The sys path for this environment. Does not include potential
-        modifications like ``sys.path.append``.
+        modifications from e.g. appending to :data:`sys.path`.
 
         :returns: list of str
         """
@@ -140,20 +141,20 @@ class SameEnvironment(_SameEnvironmentMixin, Environment):
 
 
 class InterpreterEnvironment(_SameEnvironmentMixin, _BaseEnvironment):
-    def get_evaluator_subprocess(self, evaluator):
-        return EvaluatorSameProcess(evaluator)
+    def get_inference_state_subprocess(self, inference_state):
+        return InferenceStateSameProcess(inference_state)
 
     def get_sys_path(self):
         return sys.path
 
 
-def _get_virtual_env_from_var():
+def _get_virtual_env_from_var(env_var='VIRTUAL_ENV'):
     """Get virtualenv environment from VIRTUAL_ENV environment variable.
 
     It uses `safe=False` with ``create_environment``, because the environment
     variable is considered to be safe / controlled by the user solely.
     """
-    var = os.environ.get('VIRTUAL_ENV')
+    var = os.environ.get(env_var)
     if var:
         # Under macOS in some cases - notably when using Pipenv - the
         # sys.prefix of the virtualenv is /path/to/env/bin/.. instead of
@@ -178,16 +179,21 @@ def _calculate_sha256_for_file(path):
 
 def get_default_environment():
     """
-    Tries to return an active Virtualenv. If there is no VIRTUAL_ENV variable
+    Tries to return an active Virtualenv or conda environment.
+    If there is no VIRTUAL_ENV variable or no CONDA_PREFIX variable set
     set it will return the latest Python version installed on the system. This
     makes it possible to use as many new Python features as possible when using
     autocompletion and other functionality.
 
-    :returns: :class:`Environment`
+    :returns: :class:`.Environment`
     """
     virtual_env = _get_virtual_env_from_var()
     if virtual_env is not None:
         return virtual_env
+
+    conda_env = _get_virtual_env_from_var(_CONDA_VAR)
+    if conda_env is not None:
+        return conda_env
 
     return _try_get_same_env()
 
@@ -233,7 +239,7 @@ def _try_get_same_env():
 
 
 def get_cached_default_environment():
-    var = os.environ.get('VIRTUAL_ENV')
+    var = os.environ.get('VIRTUAL_ENV') or os.environ.get(_CONDA_VAR)
     environment = _get_cached_default_environment()
 
     # Under macOS in some cases - notably when using Pipenv - the
@@ -248,35 +254,51 @@ def get_cached_default_environment():
 
 @time_cache(seconds=10 * 60)  # 10 Minutes
 def _get_cached_default_environment():
-    return get_default_environment()
+    try:
+        return get_default_environment()
+    except InvalidPythonEnvironment:
+        # It's possible that `sys.executable` is wrong. Typically happens
+        # when Jedi is used in an executable that embeds Python. For further
+        # information, have a look at:
+        # https://github.com/davidhalter/jedi/issues/1531
+        return InterpreterEnvironment()
 
 
 def find_virtualenvs(paths=None, **kwargs):
     """
     :param paths: A list of paths in your file system to be scanned for
         Virtualenvs. It will search in these paths and potentially execute the
-        Python binaries. Also the VIRTUAL_ENV variable will be checked if it
-        contains a valid Virtualenv.
+        Python binaries.
     :param safe: Default True. In case this is False, it will allow this
         function to execute potential `python` environments. An attacker might
         be able to drop an executable in a path this function is searching by
         default. If the executable has not been installed by root, it will not
         be executed.
+    :param use_environment_vars: Default True. If True, the VIRTUAL_ENV
+        variable will be checked if it contains a valid VirtualEnv.
+        CONDA_PREFIX will be checked to see if it contains a valid conda
+        environment.
 
-    :yields: :class:`Environment`
+    :yields: :class:`.Environment`
     """
-    def py27_comp(paths=None, safe=True):
+    def py27_comp(paths=None, safe=True, use_environment_vars=True):
         if paths is None:
             paths = []
 
         _used_paths = set()
 
-        # Using this variable should be safe, because attackers might be able
-        # to drop files (via git) but not environment variables.
-        virtual_env = _get_virtual_env_from_var()
-        if virtual_env is not None:
-            yield virtual_env
-            _used_paths.add(virtual_env.path)
+        if use_environment_vars:
+            # Using this variable should be safe, because attackers might be
+            # able to drop files (via git) but not environment variables.
+            virtual_env = _get_virtual_env_from_var()
+            if virtual_env is not None:
+                yield virtual_env
+                _used_paths.add(virtual_env.path)
+
+            conda_env = _get_virtual_env_from_var(_CONDA_VAR)
+            if conda_env is not None:
+                yield conda_env
+                _used_paths.add(conda_env.path)
 
         for directory in paths:
             if not os.path.isdir(directory):
@@ -286,7 +308,7 @@ def find_virtualenvs(paths=None, **kwargs):
             for path in os.listdir(directory):
                 path = os.path.join(directory, path)
                 if path in _used_paths:
-                    # A path shouldn't be evaluated twice.
+                    # A path shouldn't be inferred twice.
                     continue
                 _used_paths.add(path)
 
@@ -307,7 +329,7 @@ def find_system_environments():
 
     The environments are sorted from latest to oldest Python version.
 
-    :yields: :class:`Environment`
+    :yields: :class:`.Environment`
     """
     for version_string in _SUPPORTED_PYTHONS:
         try:
@@ -324,7 +346,7 @@ def get_system_environment(version):
     where X and Y are the major and minor versions of Python.
 
     :raises: :exc:`.InvalidPythonEnvironment`
-    :returns: :class:`Environment`
+    :returns: :class:`.Environment`
     """
     exe = which('python' + version)
     if exe:
@@ -347,7 +369,7 @@ def create_environment(path, safe=True):
     Virtualenv path or an executable path.
 
     :raises: :exc:`.InvalidPythonEnvironment`
-    :returns: :class:`Environment`
+    :returns: :class:`.Environment`
     """
     if os.path.isfile(path):
         _assert_safe(path, safe)
@@ -446,8 +468,8 @@ def _is_unix_safe_simple(real_path):
     # 2. The repository has an innocent looking folder called foobar. jedi
     #    searches for the folder and executes foobar/bin/python --version if
     #    there's also a foobar/bin/activate.
-    # 3. The bin/python is obviously not a python script but a bash script or
-    #    whatever the attacker wants.
+    # 3. The attacker has gained code execution, since he controls
+    #    foobar/bin/python.
     return uid == 0
 
 

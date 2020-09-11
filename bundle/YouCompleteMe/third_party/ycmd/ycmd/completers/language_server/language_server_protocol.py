@@ -1,4 +1,4 @@
-# Copyright (C) 2017-2018 ycmd contributors
+# Copyright (C) 2017-2020 ycmd contributors
 #
 # This file is part of ycmd.
 #
@@ -15,32 +15,22 @@
 # You should have received a copy of the GNU General Public License
 # along with ycmd.  If not, see <http://www.gnu.org/licenses/>.
 
-from __future__ import unicode_literals
-from __future__ import print_function
-from __future__ import division
-from __future__ import absolute_import
-# Not installing aliases from python-future; it's unreliable and slow.
-from builtins import *  # noqa
-
 import collections
 import os
 import json
 import hashlib
+from urllib.parse import urljoin, urlparse, unquote
+from urllib.request import pathname2url, url2pathname
 
 from ycmd.utils import ( ByteOffsetToCodepointOffset,
-                         pathname2url,
                          ToBytes,
-                         ToUnicode,
-                         unquote,
-                         url2pathname,
-                         urlparse,
-                         urljoin )
+                         ToUnicode )
 
 
 Error = collections.namedtuple( 'RequestError', [ 'code', 'reason' ] )
 
 
-class Errors( object ):
+class Errors:
   # From
   # https://microsoft.github.io/language-server-protocol/specification#response-message
   #
@@ -110,6 +100,42 @@ SEVERITY = [
   'Hint',
 ]
 
+FILE_EVENT_KIND = {
+  'create': 1,
+  'modify': 2,
+  'delete': 3
+}
+
+SYMBOL_KIND = [
+  None,
+  'File',
+  'Module',
+  'Namespace',
+  'Package',
+  'Class',
+  'Method',
+  'Property',
+  'Field',
+  'Constructor',
+  'Enum',
+  'Interface',
+  'Function',
+  'Variable',
+  'Constant',
+  'String',
+  'Number',
+  'Boolean',
+  'Array',
+  'Object',
+  'Key',
+  'Null',
+  'EnumMember',
+  'Struct',
+  'Event',
+  'Operator',
+  'TypeParameter',
+]
+
 
 class InvalidUriException( Exception ):
   """Raised when trying to convert a server URI to a file path but the scheme
@@ -126,7 +152,7 @@ class ServerFileStateStore( dict ):
     return self[ key ]
 
 
-class ServerFileState( object ):
+class ServerFileState:
   """State machine for a particular file from the server's perspective,
   including version."""
 
@@ -242,7 +268,18 @@ def Initialize( request_id, project_directory, settings ):
     'rootUri': FilePathToUri( project_directory ),
     'initializationOptions': settings,
     'capabilities': {
-      'workspace': { 'applyEdit': True, 'documentChanges': True },
+      'workspace': {
+        'applyEdit': True,
+        'didChangeWatchedFiles': {
+          'dynamicRegistration': True
+        },
+        'documentChanges': True,
+        'symbol': {
+          'symbolKind': {
+            'valueSet': list( range( 1, len( SYMBOL_KIND ) ) ),
+          }
+        }
+      },
       'textDocument': {
         'codeAction': {
           'codeActionLiteralSupport': {
@@ -261,6 +298,7 @@ def Initialize( request_id, project_directory, settings ):
         'completion': {
           'completionItemKind': {
             # ITEM_KIND list is 1-based.
+            # valueSet is a list of the indices of items supported
             'valueSet': list( range( 1, len( ITEM_KIND ) ) ),
           },
           'completionItem': {
@@ -287,6 +325,9 @@ def Initialize( request_id, project_directory, settings ):
             ],
           },
         },
+        'synchronization': {
+          'didSave': True
+        },
       },
     },
   } )
@@ -302,6 +343,10 @@ def Shutdown( request_id ):
 
 def Exit():
   return BuildNotification( 'exit', None )
+
+
+def Void( request ):
+  return Accept( request, None )
 
 
 def Reject( request, request_error, data = None ):
@@ -324,9 +369,18 @@ def Accept( request, result ):
   return BuildResponse( request, msg )
 
 
-def ApplyEditResponse( request ):
-  msg = { 'applied': True }
+def ApplyEditResponse( request, applied ):
+  msg = { 'applied': applied }
   return Accept( request, msg )
+
+
+def DidChangeWatchedFiles( path, kind ):
+  return BuildNotification( 'workspace/didChangeWatchedFiles', {
+    'changes': [ {
+      'uri': FilePathToUri( path ),
+      'type': FILE_EVENT_KIND[ kind ]
+    } ]
+  } )
 
 
 def DidChangeConfiguration( config ):
@@ -360,6 +414,19 @@ def DidChangeTextDocument( file_state, file_contents ):
       { 'text': file_contents },
     ] if file_contents is not None else [],
   } )
+
+
+def DidSaveTextDocument( file_state, file_contents ):
+  params = {
+    'textDocument': {
+      'uri': FilePathToUri( file_state.filename ),
+      'version': file_state.version,
+    },
+  }
+  if file_contents is not None:
+    params.update( { 'text': file_contents } )
+
+  return BuildNotification( 'textDocument/didSave', params )
 
 
 def DidCloseTextDocument( file_state ):
@@ -444,6 +511,12 @@ def Rename( request_id, request_data, new_name ):
     'position': Position( request_data[ 'line_num' ],
                           request_data[ 'line_value' ],
                           request_data[ 'column_codepoint' ] )
+  } )
+
+
+def WorkspaceSymbol( request_id, query ):
+  return BuildRequest( request_id, 'workspace/symbol', {
+    'query': query,
   } )
 
 

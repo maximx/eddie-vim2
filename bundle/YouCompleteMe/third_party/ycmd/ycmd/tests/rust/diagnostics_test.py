@@ -1,4 +1,4 @@
-# Copyright (C) 2019 ycmd contributors
+# Copyright (C) 2020 ycmd contributors
 #
 # This file is part of ycmd.
 #
@@ -15,29 +15,26 @@
 # You should have received a copy of the GNU General Public License
 # along with ycmd.  If not, see <http://www.gnu.org/licenses/>.
 
-from __future__ import print_function
-from __future__ import absolute_import
-from __future__ import unicode_literals
-from __future__ import division
-# Not installing aliases from python-future; it's unreliable and slow.
-from builtins import *  # noqa
-
-from future.utils import iterkeys
 from hamcrest import ( assert_that,
-                       contains,
+                       contains_exactly,
                        contains_inanyorder,
                        has_entries,
                        has_entry )
 from pprint import pformat
 import json
+import os
 
-from ycmd.tests.rust import PathToTestFile, SharedYcmd
+from ycmd.tests.rust import ( PathToTestFile,
+                              SharedYcmd,
+                              IsolatedYcmd,
+                              StartRustCompleterServerInDirectory )
 from ycmd.tests.test_utils import ( BuildRequest,
                                     LocationMatcher,
                                     PollForMessages,
                                     PollForMessagesTimeoutException,
                                     RangeMatcher,
-                                    WaitForDiagnosticsToBeReady )
+                                    WaitForDiagnosticsToBeReady,
+                                    WithRetry )
 from ycmd.utils import ReadFile
 
 
@@ -50,7 +47,7 @@ DIAG_MATCHERS_PER_FILE = {
           'no field `build_` on type `test::Builder`\n\nunknown field [E0609]',
       'location': LocationMatcher( MAIN_FILEPATH, 14, 13 ),
       'location_extent': RangeMatcher( MAIN_FILEPATH, ( 14, 13 ), ( 14, 19 ) ),
-      'ranges': contains( RangeMatcher( MAIN_FILEPATH,
+      'ranges': contains_exactly( RangeMatcher( MAIN_FILEPATH,
                                         ( 14, 13 ),
                                         ( 14, 19 ) ) ),
       'fixit_available': False
@@ -59,6 +56,7 @@ DIAG_MATCHERS_PER_FILE = {
 }
 
 
+@WithRetry
 @SharedYcmd
 def Diagnostics_DetailedDiags_test( app ):
   filepath = PathToTestFile( 'common', 'src', 'main.rs' )
@@ -76,6 +74,7 @@ def Diagnostics_DetailedDiags_test( app ):
       'no field `build_` on type `test::Builder`\n\nunknown field' ) )
 
 
+@WithRetry
 @SharedYcmd
 def Diagnostics_FileReadyToParse_test( app ):
   filepath = PathToTestFile( 'common', 'src', 'main.rs' )
@@ -88,13 +87,15 @@ def Diagnostics_FileReadyToParse_test( app ):
   assert_that( results, DIAG_MATCHERS_PER_FILE[ filepath ] )
 
 
-@SharedYcmd
+@IsolatedYcmd
 def Diagnostics_Poll_test( app ):
-  filepath = PathToTestFile( 'common', 'src', 'main.rs' )
+  project_dir = PathToTestFile( 'common' )
+  filepath = os.path.join( project_dir, 'src', 'main.rs' )
   contents = ReadFile( filepath )
+  StartRustCompleterServerInDirectory( app, project_dir )
 
   # Poll until we receive _all_ the diags asynchronously.
-  to_see = sorted( iterkeys( DIAG_MATCHERS_PER_FILE ) )
+  to_see = sorted( DIAG_MATCHERS_PER_FILE.keys() )
   seen = {}
 
   try:
@@ -114,7 +115,7 @@ def Diagnostics_Poll_test( app ):
           'filepath': message[ 'filepath' ]
         } ) )
 
-      if sorted( iterkeys( seen ) ) == to_see:
+      if sorted( seen.keys() ) == to_see:
         break
 
       # Eventually PollForMessages will throw a timeout exception and we'll fail
@@ -125,4 +126,4 @@ def Diagnostics_Poll_test( app ):
       'Timed out waiting for full set of diagnostics. '
       'Expected to see diags for {}, but only saw {}.'.format(
         json.dumps( to_see, indent=2 ),
-        json.dumps( sorted( iterkeys( seen ) ), indent=2 ) ) )
+        json.dumps( sorted( seen.keys() ), indent=2 ) ) )

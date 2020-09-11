@@ -1,6 +1,4 @@
-# encoding: utf-8
-#
-# Copyright (C) 2018 ycmd contributors
+# Copyright (C) 2020 ycmd contributors
 #
 # This file is part of ycmd.
 #
@@ -17,29 +15,24 @@
 # You should have received a copy of the GNU General Public License
 # along with ycmd.  If not, see <http://www.gnu.org/licenses/>.
 
-from __future__ import absolute_import
-from __future__ import unicode_literals
-from __future__ import print_function
-from __future__ import division
-# Not installing aliases from python-future; it's unreliable and slow.
-from builtins import *  # noqa
-
 from hamcrest import ( assert_that,
-                       contains,
+                       contains_exactly,
                        contains_inanyorder,
+                       equal_to,
                        has_entries,
                        matches_regexp )
-from nose.tools import eq_
 import requests
 import pprint
+import pytest
 
-from ycmd.tests.javascript import PathToTestFile, SharedYcmd
+from ycmd.tests.javascript import IsolatedYcmd, PathToTestFile, SharedYcmd
 from ycmd.tests.test_utils import ( BuildRequest,
                                     ChunkMatcher,
                                     CombineRequest,
                                     ErrorMatcher,
                                     LocationMatcher,
-                                    MessageMatcher )
+                                    MessageMatcher,
+                                    WaitUntilCompleterServerReady )
 from ycmd.utils import ReadFile
 
 
@@ -79,12 +72,13 @@ def RunTest( app, test ):
 
   print( 'completer response: {0}'.format( pprint.pformat( response.json ) ) )
 
-  eq_( response.status_code, test[ 'expect' ][ 'response' ] )
+  assert_that( response.status_code,
+               equal_to( test[ 'expect' ][ 'response' ] ) )
 
   assert_that( response.json, test[ 'expect' ][ 'data' ] )
 
 
-@SharedYcmd
+@IsolatedYcmd()
 def Subcommands_DefinedSubcommands_test( app ):
   subcommands_data = BuildRequest( completer_target = 'javascript' )
 
@@ -125,8 +119,8 @@ def Subcommands_Format_WholeFile_Spaces_test( app ):
     'expect': {
       'response': requests.codes.ok,
       'data': has_entries( {
-        'fixits': contains( has_entries( {
-          'chunks': contains(
+        'fixits': contains_exactly( has_entries( {
+          'chunks': contains_exactly(
             ChunkMatcher( '    ',
                           LocationMatcher( filepath,  2,  1 ),
                           LocationMatcher( filepath,  2,  3 ) ),
@@ -196,8 +190,8 @@ def Subcommands_Format_WholeFile_Tabs_test( app ):
     'expect': {
       'response': requests.codes.ok,
       'data': has_entries( {
-        'fixits': contains( has_entries( {
-          'chunks': contains(
+        'fixits': contains_exactly( has_entries( {
+          'chunks': contains_exactly(
             ChunkMatcher( '\t',
                           LocationMatcher( filepath,  2,  1 ),
                           LocationMatcher( filepath,  2,  3 ) ),
@@ -277,8 +271,8 @@ def Subcommands_Format_Range_Spaces_test( app ):
     'expect': {
       'response': requests.codes.ok,
       'data': has_entries( {
-        'fixits': contains( has_entries( {
-          'chunks': contains(
+        'fixits': contains_exactly( has_entries( {
+          'chunks': contains_exactly(
             ChunkMatcher( '    ',
                           LocationMatcher( filepath,  5,  1 ),
                           LocationMatcher( filepath,  5,  3 ) ),
@@ -298,7 +292,7 @@ def Subcommands_Format_Range_Spaces_test( app ):
   } )
 
 
-@SharedYcmd
+@IsolatedYcmd()
 def Subcommands_Format_Range_Tabs_test( app ):
   filepath = PathToTestFile( 'test.js' )
   RunTest( app, {
@@ -325,8 +319,8 @@ def Subcommands_Format_Range_Tabs_test( app ):
     'expect': {
       'response': requests.codes.ok,
       'data': has_entries( {
-        'fixits': contains( has_entries( {
-          'chunks': contains(
+        'fixits': contains_exactly( has_entries( {
+          'chunks': contains_exactly(
             ChunkMatcher( '\t',
                           LocationMatcher( filepath,  5,  1 ),
                           LocationMatcher( filepath,  5,  3 ) ),
@@ -339,6 +333,69 @@ def Subcommands_Format_Range_Tabs_test( app ):
             ChunkMatcher( '\t',
                           LocationMatcher( filepath,  8,  1 ),
                           LocationMatcher( filepath,  8,  3 ) ),
+          )
+        } ) )
+      } )
+    }
+  } )
+
+
+@IsolatedYcmd( { 'global_ycm_extra_conf':
+                 PathToTestFile( 'extra_confs', 'brace_on_same_line.py' ) } )
+def Subcommands_Format_ExtraConf_BraceOnSameLine_test( app ):
+  WaitUntilCompleterServerReady( app, 'javascript' )
+  filepath = PathToTestFile( 'extra_confs', 'func.js' )
+  RunTest( app, {
+    'description': 'Format with an extra conf, braces on new line',
+    'request': {
+      'command': 'Format',
+      'filepath': filepath,
+      'options': {
+        'tab_size': 4,
+        'insert_spaces': True
+      }
+    },
+    'expect': {
+      'response': requests.codes.ok,
+      'data': has_entries( {
+        'fixits': contains_exactly( has_entries( {
+          'chunks': contains_exactly(
+            ChunkMatcher( '    ',
+                          LocationMatcher( filepath,  2,  1 ),
+                          LocationMatcher( filepath,  2,  1 ) ),
+          )
+        } ) )
+      } )
+    }
+  } )
+
+
+@IsolatedYcmd( { 'global_ycm_extra_conf':
+                 PathToTestFile( 'extra_confs', 'brace_on_new_line.py' ) } )
+def Subcommands_Format_ExtraConf_BraceOnNewLine_test( app ):
+  WaitUntilCompleterServerReady( app, 'javascript' )
+  filepath = PathToTestFile( 'extra_confs', 'func.js' )
+  RunTest( app, {
+    'description': 'Format with an extra conf, braces on new line',
+    'request': {
+      'command': 'Format',
+      'filepath': filepath,
+      'options': {
+        'tab_size': 4,
+        'insert_spaces': True
+      }
+    },
+    'expect': {
+      'response': requests.codes.ok,
+      'data': has_entries( {
+        'fixits': contains_exactly( has_entries( {
+          'chunks': contains_exactly(
+            ChunkMatcher( matches_regexp( '\r?\n' ),
+                          LocationMatcher( filepath,  1, 19 ),
+                          LocationMatcher( filepath,  1, 20 ) ),
+            ChunkMatcher( '    ',
+                          LocationMatcher( filepath,  2,  1 ),
+                          LocationMatcher( filepath,  2,  1 ) ),
           )
         } ) )
       } )
@@ -442,7 +499,6 @@ def Subcommands_GoToReferences_test( app ):
   } )
 
 
-@SharedYcmd
 def Subcommands_GoTo( app, goto_command ):
   RunTest( app, {
     'description': goto_command + ' works within file',
@@ -459,9 +515,12 @@ def Subcommands_GoTo( app, goto_command ):
   } )
 
 
-def Subcommands_GoTo_test():
-  for command in [ 'GoTo', 'GoToDefinition', 'GoToDeclaration' ]:
-    yield Subcommands_GoTo, command
+@pytest.mark.parametrize( 'command', [ 'GoTo',
+                                       'GoToDefinition',
+                                       'GoToDeclaration' ] )
+@SharedYcmd
+def Subcommands_GoTo_test( app, command ):
+  Subcommands_GoTo( app, command )
 
 
 @SharedYcmd
@@ -498,13 +557,13 @@ def Subcommands_FixIt_test( app ):
         'fixits': contains_inanyorder(
           has_entries( {
             'text': "Declare method 'nonExistingMethod'",
-            'chunks': contains(
+            'chunks': contains_exactly(
               ChunkMatcher(
                 matches_regexp(
                   '^\r?\n'
-                  '    nonExistingMethod\\(\\) {\r?\n'
-                  '        throw new Error\\("Method not implemented."\\);\r?\n'
-                  '    }$',
+                  '  nonExistingMethod\\(\\) {\r?\n'
+                  '      throw new Error\\("Method not implemented."\\);\r?\n'
+                  '  }$',
                 ),
                 LocationMatcher( filepath, 22, 12 ),
                 LocationMatcher( filepath, 22, 12 ) )
@@ -530,8 +589,8 @@ def Subcommands_OrganizeImports_test( app ):
     'expect': {
       'response': requests.codes.ok,
       'data': has_entries( {
-        'fixits': contains( has_entries( {
-          'chunks': contains(
+        'fixits': contains_exactly( has_entries( {
+          'chunks': contains_exactly(
             ChunkMatcher(
               matches_regexp(
                 'import \\* as lib from "library";\r?\n'
@@ -606,7 +665,7 @@ def Subcommands_RefactorRename_Simple_test( app ):
     'expect': {
       'response': requests.codes.ok,
       'data': has_entries( {
-        'fixits': contains( has_entries( {
+        'fixits': contains_exactly( has_entries( {
           'chunks': contains_inanyorder(
             ChunkMatcher(
               'test',
@@ -638,7 +697,7 @@ def Subcommands_RefactorRename_MultipleFiles_test( app ):
     'expect': {
       'response': requests.codes.ok,
       'data': has_entries( {
-        'fixits': contains( has_entries( {
+        'fixits': contains_exactly( has_entries( {
           'chunks': contains_inanyorder(
             ChunkMatcher(
               'this-is-a-longer-string',
