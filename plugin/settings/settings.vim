@@ -93,3 +93,7 @@ autocmd BufWritePre * :%s/\s\+$//e
 set shell=/bin/sh
 
 hi CursorLineNr cterm=BOLD
+
+" auto load and save text folding
+autocmd BufWinLeave *.* mkview
+autocmd BufWinEnter *.* silent loadview
