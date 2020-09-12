@@ -95,5 +95,5 @@ set shell=/bin/sh
 hi CursorLineNr cterm=BOLD
 
 " auto load and save text folding
-autocmd BufWinLeave *.* mkview
-autocmd BufWinEnter *.* silent loadview
+autocmd BufWinLeave /Users/maximx/Unity\ Projects/**/*.cs mkview
+autocmd BufWinEnter /Users/maximx/Unity\ Projects/**/*.cs silent loadview
