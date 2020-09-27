@@ -7,6 +7,8 @@ import warnings
 import pytest
 
 import parso
+
+from textwrap import dedent
 from parso._compatibility import is_pypy
 from .failing_examples import FAILING_EXAMPLES, indent, build_nested
 
@@ -185,12 +187,13 @@ def test_statically_nested_blocks():
 
 
 def test_future_import_first():
-    def is_issue(code, *args):
+    def is_issue(code, *args, **kwargs):
         code = code % args
-        return bool(_get_error_list(code))
+        return bool(_get_error_list(code, **kwargs))
 
     i1 = 'from __future__ import division'
     i2 = 'from __future__ import absolute_import'
+    i3 = 'from __future__ import annotations'
     assert not is_issue(i1)
     assert not is_issue(i1 + ';' + i2)
     assert not is_issue(i1 + '\n' + i2)
@@ -201,6 +204,8 @@ def test_future_import_first():
     assert not is_issue('""\n%s;%s', i1, i2)
     assert not is_issue('"";%s;%s ', i1, i2)
     assert not is_issue('"";%s\n%s ', i1, i2)
+    assert not is_issue(i3, version="3.7")
+    assert is_issue(i3, version="3.6")
     assert is_issue('1;' + i1)
     assert is_issue('1\n' + i1)
     assert is_issue('"";1\n' + i1)
@@ -268,6 +273,9 @@ def test_too_many_levels_of_indentation():
     assert not _get_error_list(build_nested('pass', 49, base=base))
     assert _get_error_list(build_nested('pass', 50, base=base))
 
+def test_paren_kwarg():
+    assert _get_error_list("print((sep)=seperator)", version="3.8")
+    assert not _get_error_list("print((sep)=seperator)", version="3.7")
 
 @pytest.mark.parametrize(
     'code', [
@@ -321,3 +329,88 @@ def test_invalid_fstrings(code, message):
 def test_trailing_comma(code):
     errors = _get_error_list(code)
     assert not errors
+
+def test_continue_in_finally():
+    code = dedent('''\
+        for a in [1]:
+            try:
+                pass
+            finally:
+                continue
+        ''')
+    assert not _get_error_list(code, version="3.8")
+    assert _get_error_list(code, version="3.7")
+
+    
+@pytest.mark.parametrize(
+    'template', [
+        "a, b, {target}, c = d",
+        "a, b, *{target}, c = d",
+        "(a, *{target}), c = d",
+        "for x, {target} in y: pass",
+        "for x, q, {target} in y: pass",
+        "for x, q, *{target} in y: pass",
+        "for (x, *{target}), q in y: pass",
+    ]
+)
+@pytest.mark.parametrize(
+    'target', [
+        "True",
+        "False",
+        "None",
+        "__debug__"
+    ]
+)
+def test_forbidden_name(template, target):
+    assert _get_error_list(template.format(target=target), version="3")
+
+
+def test_repeated_kwarg():
+    # python 3.9+ shows which argument is repeated
+    assert (
+        _get_error_list("f(q=1, q=2)", version="3.8")[0].message
+        == "SyntaxError: keyword argument repeated"
+    )
+    assert (
+        _get_error_list("f(q=1, q=2)", version="3.9")[0].message
+        == "SyntaxError: keyword argument repeated: q"
+    )
+
+
+@pytest.mark.parametrize(
+    ('source', 'no_errors'), [
+        ('a(a for a in b,)', False),
+        ('a(a for a in b, a)', False),
+        ('a(a, a for a in b)', False),
+        ('a(a, b, a for a in b, c, d)', False),
+        ('a(a for a in b)', True),
+        ('a((a for a in b), c)', True),
+        ('a(c, (a for a in b))', True),
+        ('a(a, b, (a for a in b), c, d)', True),
+    ]
+)
+def test_unparenthesized_genexp(source, no_errors):
+    assert bool(_get_error_list(source)) ^ no_errors
+
+@pytest.mark.parametrize(
+    ('source', 'no_errors'), [
+        ('*x = 2', False),
+        ('(*y) = 1', False),
+        ('((*z)) = 1', False),
+        ('a, *b = 1', True),
+        ('a, *b, c = 1', True),
+        ('a, (*b), c = 1', True),
+        ('a, ((*b)), c = 1', True),
+        ('a, (*b, c), d = 1', True),
+        ('[*(1,2,3)]', True),
+        ('{*(1,2,3)}', True),
+        ('[*(1,2,3),]', True),
+        ('[*(1,2,3), *(4,5,6)]', True),
+        ('[0, *(1,2,3)]', True),
+        ('{*(1,2,3),}', True),
+        ('{*(1,2,3), *(4,5,6)}', True),
+        ('{0, *(4,5,6)}', True)
+    ]
+)
+def test_starred_expr(source, no_errors):
+    assert bool(_get_error_list(source, version="3")) ^ no_errors
